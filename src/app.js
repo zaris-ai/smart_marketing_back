@@ -1,7 +1,7 @@
 import express from "express";
 import "dotenv/config";
 import cors from "cors";
-
+import path from 'node:path';
 import routes from "./routes/index.js";
 import { errorHandler } from "./middlewares/errorHandler.js";
 import { notFound } from "./middlewares/notFound.js";
@@ -25,7 +25,7 @@ app.use(cors({
   allowedHeaders: ["Content-Type", "Authorization"],
   credentials: true,
 }));
-
+app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 app.options("*", cors());
 
 app.use(express.json());
