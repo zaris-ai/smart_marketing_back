@@ -1,0 +1,1 @@
+from .crew import create_manage_competitor_analysis_crew

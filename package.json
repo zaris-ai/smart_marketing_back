@@ -1,0 +1,35 @@
+{
+  "name": "node-crewai-multi-crews",
+  "version": "1.0.0",
+  "description": "Node.js API that runs multiple CrewAI crews through a Python child process",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "dev": "nodemon",
+    "start": "node src/server.js",
+    "worker": "node src/workers/crew.worker.js",
+    "crawl:myip-shopify": "node src/scripts/crawl-myip-shopify.js",
+    "test:myip-parser": "node src/scripts/test-myip-parser-local.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "axios": "^1.15.2",
+    "bcryptjs": "^3.0.3",
+    "cheerio": "^1.2.0",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "express-validator": "^7.3.2",
+    "googleapis": "^171.4.0",
+    "joi": "^18.1.2",
+    "jsonwebtoken": "^9.0.3",
+    "marked": "^18.0.0",
+    "mongoose": "^9.4.1",
+    "slugify": "^1.6.9"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}

@@ -1,0 +1,42 @@
+import { Router } from 'express';
+import blogRoutes from './blog.routes.js';
+import dashboardRoutes from './dashboard.routes.js';
+import searchRoutes from './research.routes.js';
+import competitorAnalysisRoutes from './competitor-analysis.routes.js';
+import shopifyTrendsRoutes from './shopify-trends.routes.js';
+import authRoutes from './auth.routes.js';
+import usersRoutes from './users.routes.js';
+import seoAuditRoutes from './seo-audit.routes.js';
+import seoKeywordOpportunityRoutes from './seo-keyword-opportunity.routes.js';
+import aiBlogRoutes from './ai-blog.routes.js';
+import storeOutreachRoutes from './store-outreach.routes.js';
+import problemDiscoveryRoutes from './problem-discovery.routes.js';
+import manageCompetitorRoutes from './manage-competitor.routes.js';
+import manageCompetitorAnalysisRoutes from './manage-competitor-analysis.routes.js';
+import storesRoutes from './stores.routes.js';
+import gmailRoutes from './gmail.routes.js';
+import instagramAgentRoutes from './instagram-agent.routes.js';
+import instagramPostAgentRoutes from './instagram-post-agent.routes.js';
+
+const router = Router();
+
+router.use('/blogs', blogRoutes);
+router.use('/dashboard', dashboardRoutes);
+router.use('/research', searchRoutes);
+router.use('/competitor-analysis', competitorAnalysisRoutes);
+router.use('/shopify-trends', shopifyTrendsRoutes);
+router.use('/auth', authRoutes);
+router.use('/users', usersRoutes);
+router.use('/seo-audit', seoAuditRoutes);
+router.use('/seo-keyword-opportunity', seoKeywordOpportunityRoutes);
+router.use('/ai-blogs', aiBlogRoutes);
+router.use('/store-outreach', storeOutreachRoutes);
+router.use('/problem-discovery', problemDiscoveryRoutes);
+router.use('/manage-competitors', manageCompetitorRoutes);
+router.use('/manage-competitor-analyses', manageCompetitorAnalysisRoutes);
+router.use('/stores', storesRoutes);
+router.use('/gmail', gmailRoutes);
+router.use('/instagram-agent', instagramAgentRoutes);
+router.use('/instagram-post-agent', instagramPostAgentRoutes);
+
+export default router;

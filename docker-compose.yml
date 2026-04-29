@@ -1,0 +1,82 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: crew-node-app
+    ports:
+      - "10085:10085"
+    env_file:
+      - .env
+    environment:
+      # Server
+      PORT: 10085
+     #PYTHON_BIN: .venv/bin/python
+      PYTHON_BIN: /opt/venv/bin/python3
+      
+      # Database
+      MONGODB_URI: mongodb://root:root123@mongo:27017/dashboard_db?authSource=admin
+      
+      # API Base URL
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api
+      
+      # OpenAI
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_MODEL_NAME: ${OPENAI_MODEL_NAME}
+      
+      # CrewAI
+      CREWAI_TRACING_ENABLED: ${CREWAI_TRACING_ENABLED}
+      
+      # JWT Authentication
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET}
+      JWT_ACCESS_EXPIRES_IN: ${JWT_ACCESS_EXPIRES_IN}
+      JWT_REFRESH_EXPIRES_IN: ${JWT_REFRESH_EXPIRES_IN}
+      
+      # Telegram Bot
+      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHANNEL_ID: ${TELEGRAM_CHANNEL_ID}
+      TELEGRAM_REPORT_TIMEZONE: ${TELEGRAM_REPORT_TIMEZONE}
+      TELEGRAM_ALLOWED_CREWS: ${TELEGRAM_ALLOWED_CREWS}
+      
+      # Google OAuth
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      GOOGLE_REDIRECT_URI: http://localhost:8000/api/gmail/oauth2/callback
+      GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN}
+      
+      # Crawler
+      MYIP_AJAX_URL_TEMPLATE: ${MYIP_AJAX_URL_TEMPLATE}
+      MYIP_REFERER_URL: ${MYIP_REFERER_URL}
+      
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - mongo
+    restart: unless-stopped
+    networks:
+      - crew-network
+
+  mongo:
+    image: mongo:7
+    container_name: crew-mongo
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: root123
+      MONGO_INITDB_DATABASE: dashboard_db
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - crew-network
+
+volumes:
+  mongo_data:
+
+networks:
+  crew-network:
+    driver: bridge
