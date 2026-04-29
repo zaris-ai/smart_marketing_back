@@ -8,21 +8,27 @@ import { notFound } from "./middlewares/notFound.js";
 
 const app = express();
 
-const allowedOrigins = [
+const allowedOrigins = new Set([
   "https://smart.arkaanalyzer.com",
   "https://www.smart.arkaanalyzer.com",
+  "https://web.arkaanalyzer.com",
+  "https://www.web.arkaanalyzer.com",
   "http://localhost:3000",
   "http://localhost:5173",
   "http://127.0.0.1:3000",
   "http://127.0.0.1:5173",
-];
+]);
 
 const corsOptions = {
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin) return callback(null, true);
+
+    if (allowedOrigins.has(origin)) {
       return callback(null, true);
     }
-    return callback(new Error(`Not allowed by CORS: ${origin}`));
+
+    console.error("Blocked CORS origin:", origin);
+    return callback(null, false);
   },
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
@@ -31,9 +37,33 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
-app.options("*", cors(corsOptions));
 
-app.use(express.json());
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+
+  if (origin && allowedOrigins.has(origin)) {
+    res.header("Access-Control-Allow-Origin", origin);
+    res.header("Vary", "Origin");
+    res.header("Access-Control-Allow-Credentials", "true");
+    res.header(
+      "Access-Control-Allow-Headers",
+      "Content-Type, Authorization"
+    );
+    res.header(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    );
+  }
+
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+
+  next();
+});
+
+app.use(express.json({ limit: "10mb" }));
+app.use(express.urlencoded({ extended: true }));
 
 app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
 
