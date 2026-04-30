@@ -65,7 +65,11 @@ class ReadUrlTool(BaseTool):
                         return tag["content"].strip()
                 return ""
 
-            meta_description = get_meta("description", "og:description", "twitter:description")
+            meta_description = get_meta(
+                "description",
+                "og:description",
+                "twitter:description",
+            )
             og_image = get_meta("og:image", "twitter:image")
 
             headings = {
@@ -86,10 +90,12 @@ class ReadUrlTool(BaseTool):
                     or img.get("data-lazy-src")
                     or img.get("srcset", "").split(",")[0].strip().split(" ")[0]
                 )
+
                 if not src:
                     continue
 
                 absolute_src = urljoin(url, src)
+
                 if absolute_src not in image_candidates:
                     image_candidates.append(absolute_src)
 
@@ -126,20 +132,25 @@ class ReadUrlTool(BaseTool):
 
 
 def create_marketing_email_reply_crew(payload):
-    customer_email_subject = (payload.get("customer_email_subject") or "").strip()
-    customer_email_body = (payload.get("customer_email_body") or "").strip()
-    customer_email_from = (payload.get("customer_email_from") or "").strip()
-    customer_name = (payload.get("customer_name") or "").strip()
-    desired_tone = (payload.get("desired_tone") or "professional, direct, helpful").strip()
+    raw_email_body = (payload.get("raw_email_body") or "").strip()
+
+    desired_tone = (
+        payload.get("desired_tone") or "professional, direct, helpful"
+    ).strip()
+
     sender_name = (payload.get("sender_name") or "").strip()
     sender_role = (payload.get("sender_role") or "").strip()
     sender_company = (payload.get("sender_company") or "Arka").strip()
-    cta_goal = (payload.get("cta_goal") or "continue the conversation and move toward a relevant next step").strip()
-    extra_context = (payload.get("extra_context") or "").strip()
+
+    cta_goal = (
+        payload.get("cta_goal")
+        or "reply clearly and move the conversation to the next useful step"
+    ).strip()
+
     app_urls = payload.get("app_urls") or DEFAULT_APP_URLS
 
-    if not customer_email_body:
-        raise ValueError("payload.customer_email_body is required")
+    if not raw_email_body:
+        raise ValueError("payload.raw_email_body is required")
 
     if not isinstance(app_urls, list) or len(app_urls) < 2:
         raise ValueError("payload.app_urls must contain at least 2 URLs")
@@ -147,15 +158,28 @@ def create_marketing_email_reply_crew(payload):
     llm = build_llm()
     read_url_tool = ReadUrlTool()
 
+    contact_parser = Agent(
+        role="Contact Form Email Parser",
+        goal="Extract customer/contact details from the email body only.",
+        backstory=(
+            "You parse website contact-form emails. The email body is the only source "
+            "for customer details. You never invent missing customer information."
+        ),
+        llm=llm,
+        verbose=False,
+        allow_delegation=False,
+    )
+
     source_analyst = Agent(
         role="Arka Product Source Analyst",
         goal=(
-            "Read the official Arka product sources and extract only supported facts about positioning, "
-            "value proposition, use cases, target users, features, and commercial angles."
+            "Read the official Arka website and Shopify App Store listing, then extract "
+            "only supported product facts for use in customer replies."
         ),
         backstory=(
-            "You are a strict product analyst. You only use evidence from the provided official sources. "
-            "You never invent features, promises, pricing, integrations, guarantees, or customer outcomes."
+            "You are a strict product analyst. You only use evidence from the provided "
+            "official sources. You never invent pricing, integrations, guarantees, metrics, "
+            "or unsupported product capabilities."
         ),
         tools=[read_url_tool],
         llm=llm,
@@ -163,15 +187,15 @@ def create_marketing_email_reply_crew(payload):
         allow_delegation=False,
     )
 
-    email_analyst = Agent(
-        role="Marketing Email Intent Analyst",
+    request_analyst = Agent(
+        role="Inbound Contact Request Analyst",
         goal=(
-            "Analyze an inbound marketing email and determine intent, urgency, sentiment, objections, "
-            "questions, buying stage, and what kind of answer is most appropriate."
+            "Analyze the contact-form submission, customer intent, urgency, sentiment, "
+            "and what the reply should accomplish."
         ),
         backstory=(
-            "You are a precise B2B email analyst. You decompose inbound messages into actionable commercial meaning. "
-            "You avoid generic summaries and focus on what the sender actually wants."
+            "You analyze inbound SaaS and Shopify app contact requests. You are precise, "
+            "commercially aware, and careful with vague or low-information messages."
         ),
         llm=llm,
         verbose=False,
@@ -179,14 +203,14 @@ def create_marketing_email_reply_crew(payload):
     )
 
     reply_strategist = Agent(
-        role="Marketing Reply Strategist",
+        role="Reply Strategy Specialist",
         goal=(
-            "Design the best response strategy using only supported Arka facts and the sender's actual email. "
-            "Choose what to answer, what not to claim, and what next step to propose."
+            "Design the best reply strategy using the parsed contact-form details and "
+            "only source-grounded Arka product facts."
         ),
         backstory=(
-            "You are a senior SaaS growth strategist. You optimize for clarity, trust, forward motion, and commercial relevance. "
-            "You do not over-sell and you do not make unsupported claims."
+            "You are a senior SaaS growth strategist. You optimize for clarity, credibility, "
+            "trust, and useful next steps. You do not overpromise."
         ),
         llm=llm,
         verbose=False,
@@ -194,13 +218,11 @@ def create_marketing_email_reply_crew(payload):
     )
 
     reply_writer = Agent(
-        role="Professional Email Reply Writer",
-        goal=(
-            "Write a polished, natural, commercially effective email reply to the inbound marketing email."
-        ),
+        role="Professional Customer Reply Writer",
+        goal="Write a polished, concise, helpful reply to the contact-form sender.",
         backstory=(
-            "You write concise, professional, direct email replies for SaaS and Shopify products. "
-            "You avoid fluff, robotic phrasing, and exaggerated claims."
+            "You write natural customer replies for SaaS and Shopify app businesses. "
+            "You avoid fluff, fake personalization, robotic phrasing, and unsupported claims."
         ),
         llm=llm,
         verbose=False,
@@ -208,21 +230,43 @@ def create_marketing_email_reply_crew(payload):
     )
 
     final_formatter = Agent(
-        role="Final JSON Formatter",
-        goal=(
-            "Return the final answer package in strict valid JSON only for backend storage and UI rendering."
-        ),
+        role="Strict JSON Formatter",
+        goal="Return strict valid JSON only for backend storage and UI rendering.",
         backstory=(
-            "You are a strict formatter. You return valid JSON only and preserve the final analysis and reply exactly."
+            "You are a strict formatter. You return valid JSON only. No markdown. "
+            "No code fences. No commentary."
         ),
         llm=llm,
         verbose=False,
         allow_delegation=False,
     )
 
+    parse_task = Task(
+        description=(
+            "Parse this contact-form email body. Analyze the body only for customer/contact data.\n\n"
+            f"EMAIL BODY:\n{raw_email_body}\n\n"
+            "Extract these fields if present:\n"
+            "- label\n"
+            "- full_name\n"
+            "- email\n"
+            "- shopify_store\n"
+            "- topic\n"
+            "- message\n"
+            "- source\n\n"
+            "Rules:\n"
+            "- The email body is the only source for customer/contact details.\n"
+            "- If a field is missing, return an empty string.\n"
+            "- contact.email must come from the *Email:* field in the body if present.\n"
+            "- Preserve the customer's message meaning exactly.\n"
+            "- Do not invent missing fields.\n"
+        ),
+        expected_output="Structured customer/contact data extracted from the email body.",
+        agent=contact_parser,
+    )
+
     source_analysis_task = Task(
         description=(
-            f"Analyze the official Arka product sources using the read_url tool:\n"
+            "Analyze the official Arka product sources using the read_url tool:\n"
             f"1. {app_urls[0]}\n"
             f"2. {app_urls[1]}\n\n"
             "Required output:\n"
@@ -232,130 +276,120 @@ def create_marketing_email_reply_crew(payload):
             "4. Main value proposition\n"
             "5. Main features clearly visible from the source pages\n"
             "6. The type of Shopify user the product is clearly for\n"
-            "7. The merchant problems the product appears to solve\n"
+            "7. Merchant problems the product appears to solve\n"
             "8. Commercial positioning and messaging angles\n"
-            "9. Facts that are safe to mention in an email reply\n"
-            "10. Unsupported claims that must be avoided\n\n"
+            "9. Safe product facts that can be mentioned in replies\n"
+            "10. Claims that must be avoided because they are unsupported\n\n"
             "Rules:\n"
             "- Use the read_url tool for both URLs.\n"
-            "- Use only the provided official sources as truth.\n"
-            "- No invented features, metrics, pricing, guarantees, or integrations.\n"
+            "- Use only the provided URLs as product truth.\n"
             "- Separate fact from inference.\n"
+            "- Do not invent pricing, integrations, guarantees, performance metrics, "
+            "customer outcomes, or product capabilities.\n"
         ),
-        expected_output="A structured source-grounded analysis of Arka for safe use in reply writing.",
+        expected_output="A structured, source-grounded Arka product analysis.",
         agent=source_analyst,
     )
 
-    email_analysis_task = Task(
+    analysis_task = Task(
         description=(
-            "Analyze this inbound marketing email.\n\n"
-            f"From: {customer_email_from or 'Unknown'}\n"
-            f"Customer name: {customer_name or 'Unknown'}\n"
-            f"Subject: {customer_email_subject or '(No subject)'}\n"
-            f"Body:\n{customer_email_body}\n\n"
-            f"Extra context from backend/user: {extra_context or 'None'}\n\n"
-            "Required output:\n"
+            "Analyze the customer's contact-form submission using the parsed contact data "
+            "and the source-grounded Arka product analysis.\n\n"
+            "Required analysis:\n"
             "1. Primary intent\n"
-            "2. Secondary intent if any\n"
-            "3. Sentiment\n"
-            "4. Buying or conversation stage\n"
-            "5. Main questions explicitly asked\n"
-            "6. Hidden concerns or objections inferred from the wording\n"
-            "7. Urgency level\n"
-            "8. What the sender likely wants next\n"
-            "9. Risks in replying incorrectly\n"
-            "10. Recommended answer direction\n\n"
+            "2. Sentiment\n"
+            "3. Urgency\n"
+            "4. Is the message actionable?\n"
+            "5. Missing information needed from the customer\n"
+            "6. Recommended response goal\n"
+            "7. Safe product facts relevant to this contact message\n"
+            "8. Claims to avoid in this specific reply\n"
+            "9. Whether human review is needed\n\n"
             "Rules:\n"
-            "- Analyze the actual email, not a hypothetical one.\n"
-            "- Be concrete.\n"
-            "- Distinguish explicit asks from inferred asks.\n"
-            "- Do not answer yet.\n"
+            "- If the customer message is vague, say it is vague.\n"
+            "- If the message is short like 'meh', do not pretend there is deep intent.\n"
+            "- Use only the parsed body details for customer data.\n"
+            "- Use only the source analysis for product facts.\n"
+            "- Do not claim the Shopify store was reviewed.\n"
         ),
-        expected_output="A structured analysis of the inbound email's meaning and reply needs.",
-        agent=email_analyst,
-        context=[source_analysis_task],
+        expected_output="Structured analysis of the customer request and relevant product facts.",
+        agent=request_analyst,
+        context=[parse_task, source_analysis_task],
     )
 
     strategy_task = Task(
         description=(
-            "Using the product source analysis and the email analysis, decide the best reply strategy.\n\n"
-            "You must decide all of the following:\n"
-            "1. Should we reply now or defer to human review?\n"
-            "2. Main response objective\n"
-            "3. The 3 to 7 key points to address\n"
-            "4. Which product facts are safe to use\n"
-            "5. Which claims must be avoided\n"
-            "6. Whether to push for demo, trial, clarification, or simple follow-up\n"
-            "7. Best CTA\n"
-            "8. Best tone\n"
-            "9. Whether the reply should mention limits/unknowns explicitly\n\n"
+            "Create the best reply strategy using the parsed contact-form details, "
+            "request analysis, and source-grounded Arka product facts.\n\n"
+            "Decide:\n"
+            "1. Main response objective\n"
+            "2. 3 to 7 key points to address\n"
+            "3. Which Arka facts are safe to mention\n"
+            "4. Which claims must be avoided\n"
+            "5. Whether to ask for clarification, offer help, suggest trial, or move to a call\n"
+            "6. Best CTA\n"
+            "7. Best tone\n"
+            "8. Whether human review is needed before sending\n\n"
             f"Desired tone: {desired_tone}\n"
-            f"CTA goal: {cta_goal}\n"
-            f"Sender name for signature: {sender_name or 'Not provided'}\n"
-            f"Sender role: {sender_role or 'Not provided'}\n"
-            f"Sender company: {sender_company}\n\n"
+            f"CTA goal: {cta_goal}\n\n"
             "Rules:\n"
-            "- Use only supported product facts.\n"
-            "- If a question cannot be answered from the source pages or provided context, say it should be framed carefully or deferred.\n"
             "- Optimize for credibility and forward motion.\n"
-            "- Do not overpromise.\n"
+            "- Do not over-sell.\n"
+            "- If the customer message is unclear, the strategy must ask for clarification.\n"
+            "- Use only supported product facts from the official URLs.\n"
         ),
-        expected_output="A complete reply strategy grounded in the sources and the inbound email.",
+        expected_output="A complete reply strategy.",
         agent=reply_strategist,
-        context=[source_analysis_task, email_analysis_task],
+        context=[parse_task, source_analysis_task, analysis_task],
     )
 
     writing_task = Task(
         description=(
-            "Write the final email reply.\n\n"
+            "Write the final reply to the contact-form sender.\n\n"
+            f"Desired tone: {desired_tone}\n"
+            f"CTA goal: {cta_goal}\n"
+            f"Sender name: {sender_name or 'Not provided'}\n"
+            f"Sender role: {sender_role or 'Not provided'}\n"
+            f"Sender company: {sender_company}\n\n"
             "Requirements:\n"
-            "- Professional, direct, natural, human tone\n"
-            "- Answer the sender's real intent\n"
-            "- Use only supported product information\n"
-            "- Keep the email commercially useful\n"
-            "- Do not sound generic or robotic\n"
-            "- Do not invent pricing, integrations, guarantees, timelines, or capabilities\n"
-            "- If something is not confirmed, phrase it carefully\n"
-            "- Return both:\n"
-            "  1. a reply subject line\n"
-            "  2. a plain-text reply body\n"
-            "  3. a simple HTML reply body using only p, br, strong, em, ul, li, a\n\n"
-            f"Signature guidance:\n"
-            f"- Sender name: {sender_name or 'Leave signature generic if not provided'}\n"
-            f"- Sender role: {sender_role or 'Omit if not provided'}\n"
-            f"- Sender company: {sender_company}\n\n"
-            "Rules:\n"
-            "- Do not output markdown fences.\n"
-            "- Do not output JSON.\n"
-            "- Do not include placeholders like [Your Name] unless the data is actually missing.\n"
-            "- If signature details are missing, end cleanly without fake details.\n"
+            "- Address the customer by full name if available.\n"
+            "- If their message is vague, ask a clear follow-up question.\n"
+            "- If a Shopify store is provided, mention it naturally.\n"
+            "- Do not say you reviewed the Shopify store.\n"
+            "- Use only source-grounded Arka facts from the official URLs.\n"
+            "- Do not invent pricing, guarantees, integrations, timelines, metrics, or capabilities.\n"
+            "- Be concise, professional, natural, and commercially useful.\n"
+            "- Include a clean signature using provided sender details.\n"
+            "- Return a reply subject line, a plain-text reply body, and a simple HTML reply body.\n"
         ),
-        expected_output="A subject line, a plain-text email reply, and an HTML email reply.",
+        expected_output="A reply subject, body_text, and body_html.",
         agent=reply_writer,
-        context=[source_analysis_task, email_analysis_task, strategy_task],
+        context=[parse_task, source_analysis_task, analysis_task, strategy_task],
     )
 
     final_json_task = Task(
         description=(
-            "Return valid JSON only.\n\n"
+            "Return strict valid JSON only.\n\n"
             "JSON schema:\n"
             "{\n"
+            '  "source_type": "contact_form_email",\n'
             '  "app_name": "string",\n'
             '  "source_urls": ["string"],\n'
-            '  "customer_email": {\n'
-            '    "from": "string",\n'
-            '    "name": "string",\n'
-            '    "subject": "string",\n'
-            '    "body": "string"\n'
+            '  "contact": {\n'
+            '    "label": "string",\n'
+            '    "full_name": "string",\n'
+            '    "email": "string",\n'
+            '    "shopify_store": "string",\n'
+            '    "topic": "string",\n'
+            '    "message": "string",\n'
+            '    "source": "string"\n'
             "  },\n"
             '  "analysis": {\n'
             '    "primary_intent": "string",\n'
-            '    "secondary_intent": "string",\n'
             '    "sentiment": "string",\n'
-            '    "stage": "string",\n'
             '    "urgency": "string",\n'
-            '    "explicit_questions": ["string"],\n'
-            '    "inferred_concerns": ["string"],\n'
+            '    "is_actionable": true,\n'
+            '    "missing_information": ["string"],\n'
             '    "recommended_response_goal": "string",\n'
             '    "safe_product_facts": ["string"],\n'
             '    "claims_to_avoid": ["string"],\n'
@@ -372,30 +406,36 @@ def create_marketing_email_reply_crew(payload):
             '    "body_html": "string"\n'
             "  }\n"
             "}\n\n"
-            "Rules:\n"
+            "Hard rules:\n"
             "- Output strict valid JSON only.\n"
             "- No markdown.\n"
             "- No code fences.\n"
-            "- Preserve the actual customer email subject/body.\n"
-            "- body_html must be simple email-safe HTML.\n"
-            "- needs_human_review must be true if the reply depends on unsupported or missing facts.\n"
+            "- No explanation outside JSON.\n"
+            "- app_name should be the product/app name found from the official sources, or 'Arka: Smart Analyzer' if clearly supported.\n"
+            f"- source_urls must equal: {json.dumps(app_urls, ensure_ascii=False)}\n"
+            "- contact data must come only from the email body.\n"
+            "- product facts must come only from the official source URLs.\n"
+            "- contact.email must come from the *Email:* field in the body if available.\n"
+            "- body_html must use only p, br, strong, em, ul, li, a.\n"
         ),
         expected_output="Strict valid JSON only.",
         agent=final_formatter,
-        context=[source_analysis_task, email_analysis_task, strategy_task, writing_task],
+        context=[parse_task, source_analysis_task, analysis_task, strategy_task, writing_task],
     )
 
     return Crew(
         agents=[
+            contact_parser,
             source_analyst,
-            email_analyst,
+            request_analyst,
             reply_strategist,
             reply_writer,
             final_formatter,
         ],
         tasks=[
+            parse_task,
             source_analysis_task,
-            email_analysis_task,
+            analysis_task,
             strategy_task,
             writing_task,
             final_json_task,
@@ -403,24 +443,3 @@ def create_marketing_email_reply_crew(payload):
         process=Process.sequential,
         verbose=False,
     )
-
-
-if __name__ == "__main__":
-    sample_payload = {
-        "customer_email_from": "merchant@example.com",
-        "customer_name": "John",
-        "customer_email_subject": "Interested in Arka for our Shopify store",
-        "customer_email_body": (
-            "Hi, we are looking for a better way to understand store performance and customer behavior. "
-            "Can you explain what Arka does and whether it can help us make better decisions?"
-        ),
-        "desired_tone": "professional, helpful, concise",
-        "sender_name": "Mahdi",
-        "sender_role": "Founder",
-        "sender_company": "Arka",
-        "cta_goal": "move the conversation toward a short discovery call",
-    }
-
-    crew = create_marketing_email_reply_crew(sample_payload)
-    result = crew.kickoff()
-    print(result)

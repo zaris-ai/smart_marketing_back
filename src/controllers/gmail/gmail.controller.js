@@ -1,4 +1,5 @@
 import asyncHandler from '../../utils/asyncHandler.js';
+import GmailEmail from '../../models/gmailEmail.model.js';
 import {
   exchangeCode,
   getAuthUrl,
@@ -34,36 +35,15 @@ function getReadableBody(message) {
   );
 }
 
-function extractEmailAddress(value = '') {
-  if (!value) return '';
-
-  const match = value.match(/<([^>]+)>/);
-  if (match?.[1]) {
-    return match[1].trim();
-  }
-
-  return value.trim();
-}
-
-function extractNameFromFromField(value = '') {
-  if (!value) return '';
-
-  const angleMatch = value.match(/^(.*?)\s*<[^>]+>$/);
-  if (angleMatch?.[1]) {
-    return angleMatch[1].replace(/^"|"$/g, '').trim();
-  }
-
-  const emailOnly = extractEmailAddress(value);
-  if (emailOnly.includes('@')) {
-    return '';
-  }
-
-  return value.trim();
-}
-
 function validateCrewResponse(parsed) {
   if (!parsed || typeof parsed !== 'object') {
     const error = new Error('Crew returned invalid JSON content');
+    error.statusCode = 500;
+    throw error;
+  }
+
+  if (!parsed.contact || typeof parsed.contact !== 'object') {
+    const error = new Error('Crew response is missing contact section');
     error.statusCode = 500;
     throw error;
   }
@@ -93,28 +73,26 @@ function validateCrewResponse(parsed) {
   }
 }
 
-function buildThreadContext(thread, currentEmailId) {
-  if (!thread?.messages?.length) return '';
-
-  const sorted = [...thread.messages].sort(
-    (a, b) => Number(a.internalDate || 0) - Number(b.internalDate || 0)
-  );
-
-  const compactMessages = sorted.map((message, index) => {
-    const marker = message.id === currentEmailId ? 'CURRENT EMAIL' : `THREAD MESSAGE ${index + 1}`;
-
-    return [
-      marker,
-      `Subject: ${message.subject || '(No subject)'}`,
-      `From: ${message.from || '—'}`,
-      `To: ${message.to || '—'}`,
-      `CC: ${message.cc || '—'}`,
-      `Date: ${message.date || '—'}`,
-      `Body: ${getReadableBody(message)}`,
-    ].join('\n');
-  });
-
-  return compactMessages.join('\n\n---\n\n');
+function buildEmailDbPayload(email, thread = null) {
+  return {
+    gmailId: email.id,
+    threadId: email.threadId || '',
+    labelIds: email.labelIds || [],
+    snippet: email.snippet || '',
+    historyId: email.historyId || '',
+    internalDate: email.internalDate || '',
+    from: email.from || '',
+    to: email.to || '',
+    cc: email.cc || '',
+    bcc: email.bcc || '',
+    subject: email.subject || '',
+    date: email.date || '',
+    textPlain: email.textPlain || '',
+    textHtml: email.textHtml || '',
+    headers: email.headers || [],
+    threadMessages: thread?.messages || [],
+    deletedAt: null,
+  };
 }
 
 export const gmailAuthUrl = asyncHandler(async (req, res) => {
@@ -184,6 +162,264 @@ export const getMyThreadById = asyncHandler(async (req, res) => {
   });
 });
 
+export const saveMyEmailById = asyncHandler(async (req, res) => {
+  const emailId = req.params.id;
+
+  if (!emailId) {
+    return res.status(400).json({
+      success: false,
+      message: 'Email id is required',
+    });
+  }
+
+  const email = await getEmailById(emailId);
+
+  if (!email) {
+    return res.status(404).json({
+      success: false,
+      message: 'Email not found',
+    });
+  }
+
+  let thread = null;
+
+  if (email.threadId) {
+    try {
+      thread = await getThreadById(email.threadId);
+    } catch {
+      thread = null;
+    }
+  }
+
+  const saved = await GmailEmail.findOneAndUpdate(
+    { gmailId: email.id },
+    {
+      $set: buildEmailDbPayload(email, thread),
+      $setOnInsert: {
+        status: 'unread',
+        answerStatus: 'not_answered',
+        localTags: [],
+      },
+    },
+    {
+      new: true,
+      upsert: true,
+    }
+  );
+
+  res.json({
+    success: true,
+    message: 'Email saved successfully',
+    data: saved,
+  });
+});
+
+export const listSavedMyEmails = asyncHandler(async (req, res) => {
+  const page = Math.max(Number(req.query.page || 1), 1);
+  const limit = Math.min(Math.max(Number(req.query.limit || 20), 1), 100);
+  const skip = (page - 1) * limit;
+
+  const q = normalizeString(req.query.q);
+  const status = normalizeString(req.query.status);
+  const answerStatus = normalizeString(req.query.answerStatus);
+  const tag = normalizeString(req.query.tag);
+  const hasAnalysis = normalizeString(req.query.hasAnalysis);
+
+  const sortBy = normalizeString(req.query.sortBy) || 'createdAt';
+  const sortOrder = normalizeString(req.query.sortOrder) === 'asc' ? 1 : -1;
+
+  const allowedSortFields = [
+    'createdAt',
+    'updatedAt',
+    'date',
+    'subject',
+    'from',
+    'status',
+    'answerStatus',
+  ];
+
+  const safeSortBy = allowedSortFields.includes(sortBy) ? sortBy : 'createdAt';
+
+  const filter = {
+    deletedAt: null,
+  };
+
+  if (status) {
+    filter.status = status;
+  }
+
+  if (answerStatus) {
+    filter.answerStatus = answerStatus;
+  }
+
+  if (tag) {
+    filter.localTags = tag;
+  }
+
+  if (hasAnalysis === 'true') {
+    filter.latestAnalysis = { $ne: null };
+  }
+
+  if (hasAnalysis === 'false') {
+    filter.latestAnalysis = null;
+  }
+
+  if (q) {
+    filter.$or = [
+      { subject: { $regex: q, $options: 'i' } },
+      { from: { $regex: q, $options: 'i' } },
+      { to: { $regex: q, $options: 'i' } },
+      { textPlain: { $regex: q, $options: 'i' } },
+      { snippet: { $regex: q, $options: 'i' } },
+      { localTags: { $regex: q, $options: 'i' } },
+    ];
+  }
+
+  const [items, total] = await Promise.all([
+    GmailEmail.find(filter)
+      .sort({ [safeSortBy]: sortOrder, createdAt: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean(),
+    GmailEmail.countDocuments(filter),
+  ]);
+
+  res.json({
+    success: true,
+    data: {
+      items,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages: Math.ceil(total / limit),
+      },
+      filters: {
+        q,
+        status,
+        answerStatus,
+        tag,
+        hasAnalysis,
+        sortBy: safeSortBy,
+        sortOrder: sortOrder === 1 ? 'asc' : 'desc',
+      },
+    },
+  });
+});
+
+export const getSavedMyEmailById = asyncHandler(async (req, res) => {
+  const data = await GmailEmail.findOne({
+    _id: req.params.id,
+    deletedAt: null,
+  }).lean();
+
+  if (!data) {
+    return res.status(404).json({
+      success: false,
+      message: 'Saved email not found',
+    });
+  }
+
+  res.json({
+    success: true,
+    data,
+  });
+});
+
+export const updateSavedMyEmailById = asyncHandler(async (req, res) => {
+  const allowed = {};
+
+  if (req.body.status) {
+    if (!['read', 'unread'].includes(req.body.status)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid status. Use read or unread.',
+      });
+    }
+
+    allowed.status = req.body.status;
+  }
+
+  if (req.body.answerStatus) {
+    if (!['answered', 'not_answered'].includes(req.body.answerStatus)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Invalid answerStatus. Use answered or not_answered.',
+      });
+    }
+
+    allowed.answerStatus = req.body.answerStatus;
+  }
+
+  if (Array.isArray(req.body.localTags)) {
+    allowed.localTags = req.body.localTags
+      .map((tag) => normalizeString(tag))
+      .filter(Boolean);
+  }
+
+  const data = await GmailEmail.findOneAndUpdate(
+    {
+      _id: req.params.id,
+      deletedAt: null,
+    },
+    {
+      $set: allowed,
+    },
+    {
+      new: true,
+    }
+  );
+
+  if (!data) {
+    return res.status(404).json({
+      success: false,
+      message: 'Saved email not found',
+    });
+  }
+
+  res.json({
+    success: true,
+    message: 'Saved email updated successfully',
+    data,
+  });
+});
+
+export const deleteSavedMyEmailById = asyncHandler(async (req, res) => {
+  const hard = String(req.query.hard || '') === 'true';
+
+  const data = hard
+    ? await GmailEmail.findByIdAndDelete(req.params.id)
+    : await GmailEmail.findOneAndUpdate(
+        {
+          _id: req.params.id,
+          deletedAt: null,
+        },
+        {
+          $set: {
+            deletedAt: new Date(),
+          },
+        },
+        {
+          new: true,
+        }
+      );
+
+  if (!data) {
+    return res.status(404).json({
+      success: false,
+      message: 'Saved email not found',
+    });
+  }
+
+  res.json({
+    success: true,
+    message: hard
+      ? 'Saved email permanently deleted'
+      : 'Saved email deleted successfully',
+    data,
+  });
+});
+
 export const analyzeMyEmailById = asyncHandler(async (req, res) => {
   const emailId = req.params.id;
 
@@ -204,6 +440,7 @@ export const analyzeMyEmailById = asyncHandler(async (req, res) => {
   }
 
   let thread = null;
+
   if (email.threadId) {
     try {
       thread = await getThreadById(email.threadId);
@@ -212,11 +449,10 @@ export const analyzeMyEmailById = asyncHandler(async (req, res) => {
     }
   }
 
+  const emailBody = getReadableBody(email);
+
   const payload = {
-    customer_email_from: extractEmailAddress(email.from),
-    customer_name: extractNameFromFromField(email.from),
-    customer_email_subject: normalizeString(email.subject),
-    customer_email_body: getReadableBody(email),
+    raw_email_body: emailBody,
     desired_tone:
       normalizeString(req.body?.desired_tone) ||
       'professional, direct, helpful',
@@ -225,10 +461,7 @@ export const analyzeMyEmailById = asyncHandler(async (req, res) => {
     sender_company: normalizeString(req.body?.sender_company) || 'Arka',
     cta_goal:
       normalizeString(req.body?.cta_goal) ||
-      'move the conversation toward a short discovery call',
-    extra_context:
-      normalizeString(req.body?.extra_context) ||
-      buildThreadContext(thread, email.id),
+      'reply clearly and move the conversation to the next useful step',
   };
 
   const result = await runPythonCrew({
@@ -241,10 +474,40 @@ export const analyzeMyEmailById = asyncHandler(async (req, res) => {
 
   validateCrewResponse(parsed);
 
+  const dbPayload = buildEmailDbPayload(email, thread);
+
+  const saved = await GmailEmail.findOneAndUpdate(
+    { gmailId: email.id },
+    {
+      $set: {
+        ...dbPayload,
+        latestAnalysis: parsed,
+      },
+      $setOnInsert: {
+        status: 'unread',
+        answerStatus: 'not_answered',
+        localTags: [],
+      },
+      $push: {
+        analysisHistory: {
+          analyzedAt: new Date(),
+          crewName: 'marketing_email_reply',
+          payload,
+          result: parsed,
+        },
+      },
+    },
+    {
+      new: true,
+      upsert: true,
+    }
+  );
+
   res.json({
     success: true,
-    message: 'Marketing email analysis generated successfully',
+    message: 'Contact form email analyzed successfully',
     data: parsed,
+    savedEmail: saved,
     meta: {
       crewName: 'marketing_email_reply',
       emailId: email.id,
