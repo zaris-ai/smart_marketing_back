@@ -12,8 +12,9 @@ from crews.manage_competitor_analysis.crew import create_manage_competitor_analy
 from crews.marketing_email_reply.crew import create_marketing_email_reply_crew
 from crews.instagram.crew import create_instagram_story_idea_crew
 from crews.instagram_post.crew import create_instagram_post_idea_crew
+from crews.store_crm_analysis.crew import create_store_crm_analysis_crew
 
-    
+
 def build_crew(crew_name, payload):
     if crew_name == "blog":
         return create_blog_crew(payload)
@@ -38,6 +39,9 @@ def build_crew(crew_name, payload):
 
     if crew_name == "store_outreach":
         return create_store_outreach_crew(payload)
+
+    if crew_name == "store_crm_analysis":
+        return create_store_crm_analysis_crew(payload)
 
     if crew_name == "seo_audit":
         return create_seo_audit_crew(payload)

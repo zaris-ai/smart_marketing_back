@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import mongoose from 'mongoose';
 import Joi from 'joi';
+
 import Store from '../../models/store.model.js';
 import {
   parsePagination,
@@ -79,6 +80,7 @@ const createStoreSchema = Joi.object({
   contactEmail: Joi.string().trim().email().allow('').default(''),
   notes: Joi.string().trim().allow('').default(''),
   isActive: Joi.boolean().default(true),
+  isChecked: Joi.boolean().default(false),
 });
 
 const updateStoreSchema = Joi.object({
@@ -89,16 +91,30 @@ const updateStoreSchema = Joi.object({
   contactEmail: Joi.string().trim().email().allow(''),
   notes: Joi.string().trim().allow(''),
   isActive: Joi.boolean(),
+  isChecked: Joi.boolean(),
 }).min(1);
 
 const listStoresSchema = Joi.object({
   page: Joi.number().integer().min(1).default(1),
   limit: Joi.number().integer().min(1).max(100).default(20),
+
   q: Joi.string().trim().allow('').optional(),
+  country: Joi.string().trim().allow('').optional(),
+
   isActive: Joi.boolean().optional(),
+  isChecked: Joi.boolean().optional(),
+
+  sortBy: Joi.string()
+    .valid('createdAt', 'updatedAt', 'name', 'domain', 'country', 'checkedAt')
+    .default('createdAt'),
+
+  sortOrder: Joi.string().valid('asc', 'desc').default('desc'),
 });
 
 function buildStorePayload(raw = {}) {
+  const isChecked =
+    raw.isChecked === undefined ? false : Boolean(raw.isChecked);
+
   return {
     name: cleanString(raw.name),
     domain: normalizeDomain(raw.domain),
@@ -108,6 +124,8 @@ function buildStorePayload(raw = {}) {
     contactEmail: cleanString(raw.contactEmail).toLowerCase(),
     notes: cleanString(raw.notes),
     isActive: raw.isActive === undefined ? true : Boolean(raw.isActive),
+    isChecked,
+    checkedAt: isChecked ? new Date() : null,
   };
 }
 
@@ -125,6 +143,11 @@ function buildUpdatePayload(raw = {}) {
 
   if (raw.notes !== undefined) payload.notes = cleanString(raw.notes);
   if (raw.isActive !== undefined) payload.isActive = Boolean(raw.isActive);
+
+  if (raw.isChecked !== undefined) {
+    payload.isChecked = Boolean(raw.isChecked);
+    payload.checkedAt = payload.isChecked ? new Date() : null;
+  }
 
   return payload;
 }
@@ -179,6 +202,11 @@ function buildImportedStorePayload(raw = {}) {
     pickFirst(raw, ['world_site_popular_rating', 'popular_rating', 'rank'])
   );
 
+  const importedIsChecked =
+    raw.isChecked === undefined && raw.checked === undefined
+      ? false
+      : Boolean(raw.isChecked ?? raw.checked);
+
   const notesParts = [];
 
   if (websiteIpAddress) notesParts.push(`IP: ${websiteIpAddress}`);
@@ -196,6 +224,8 @@ function buildImportedStorePayload(raw = {}) {
     contactEmail,
     notes: notesParts.join(' | '),
     isActive: true,
+    isChecked: importedIsChecked,
+    checkedAt: importedIsChecked ? now : null,
     metadata: {
       source: 'json_replace_import',
       originalNo: cleanString(raw.no),
@@ -240,7 +270,12 @@ async function collectionExists(collectionName) {
 async function createStoreIndexes(collection) {
   await collection.createIndex({ domain: 1 }, { unique: true });
   await collection.createIndex({ createdAt: -1 });
-  await collection.createIndex({ name: 'text', domain: 'text' });
+  await collection.createIndex({ updatedAt: -1 });
+  await collection.createIndex({ checkedAt: -1 });
+  await collection.createIndex({ isChecked: 1, createdAt: -1 });
+  await collection.createIndex({ isActive: 1, createdAt: -1 });
+  await collection.createIndex({ country: 1, createdAt: -1 });
+  await collection.createIndex({ name: 'text', domain: 'text', contactEmail: 'text' });
 }
 
 function getWriteErrors(error) {
@@ -308,9 +343,7 @@ async function* readTopLevelJsonArrayObjects(filePath) {
       }
 
       if (!arrayStarted) {
-        if (/\s/.test(char)) {
-          continue;
-        }
+        if (/\s/.test(char)) continue;
 
         if (char !== '[') {
           throw createImportFileError(
@@ -323,17 +356,12 @@ async function* readTopLevelJsonArrayObjects(filePath) {
       }
 
       if (arrayEnded) {
-        if (/\s/.test(char)) {
-          continue;
-        }
-
+        if (/\s/.test(char)) continue;
         throw createImportFileError('Invalid data after closing JSON array.');
       }
 
       if (!collectingObject) {
-        if (/\s/.test(char) || char === ',') {
-          continue;
-        }
+        if (/\s/.test(char) || char === ',') continue;
 
         if (char === ']') {
           arrayEnded = true;
@@ -484,6 +512,14 @@ export async function listStores(req, res) {
       filter.isActive = value.isActive;
     }
 
+    if (value.isChecked !== undefined) {
+      filter.isChecked = value.isChecked;
+    }
+
+    if (value.country) {
+      filter.country = { $regex: value.country, $options: 'i' };
+    }
+
     if (value.q) {
       filter.$or = [
         { name: { $regex: value.q, $options: 'i' } },
@@ -493,12 +529,13 @@ export async function listStores(req, res) {
       ];
     }
 
+    const sort = {
+      [value.sortBy]: value.sortOrder === 'asc' ? 1 : -1,
+      _id: -1,
+    };
+
     const [stores, total] = await Promise.all([
-      Store.find(filter)
-        .sort({ createdAt: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
+      Store.find(filter).sort(sort).skip(skip).limit(limit).lean(),
       Store.countDocuments(filter),
     ]);
 
@@ -534,7 +571,7 @@ export async function getStoreById(req, res) {
       });
     }
 
-    const store = await Store.findById(id);
+    const store = await Store.findById(id).lean();
 
     if (!store) {
       return res.status(404).json({
