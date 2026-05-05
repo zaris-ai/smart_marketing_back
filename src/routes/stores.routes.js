@@ -11,7 +11,7 @@ import {
   getStoreById,
   updateStore,
   deleteStore,
-  replaceStoresFromJson,
+  importStoresFromJson,
 } from '../controllers/stores/stores.controller.js';
 
 import {
@@ -19,9 +19,6 @@ import {
   createStoreCrmActivity,
   updateStoreCrmActivity,
   deleteStoreCrmActivity,
-  analyzeStoreCrm,
-  getLatestStoreCrmAnalysis,
-  listStoreCrmAnalyses,
 } from '../controllers/stores/storeCrm.controller.js';
 
 const router = express.Router();
@@ -37,6 +34,7 @@ const upload = multer({
     destination(req, file, cb) {
       cb(null, importUploadDir);
     },
+
     filename(req, file, cb) {
       const safeOriginalName = String(file.originalname || 'stores.json')
         .replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -47,9 +45,10 @@ const upload = multer({
   }),
 
   fileFilter(req, file, cb) {
+    const originalName = String(file.originalname || '').toLowerCase();
+
     const isJson =
-      file.mimetype === 'application/json' ||
-      file.originalname.toLowerCase().endsWith('.json');
+      file.mimetype === 'application/json' || originalName.endsWith('.json');
 
     if (!isJson) {
       cb(new Error('Only JSON files are allowed'));
@@ -60,28 +59,46 @@ const upload = multer({
   },
 });
 
+/**
+ * Store routes
+ */
 router.get('/', auth, listStores);
 router.post('/', auth, createStore);
 
-router.post('/replace-json', auth, upload.single('file'), replaceStoresFromJson);
+/**
+ * JSON append import
+ *
+ * Adds new stores only.
+ * Existing stores are not deleted.
+ * Duplicate domains are skipped.
+ */
+router.post('/import-json', auth, upload.single('file'), importStoresFromJson);
 
+/**
+ * Store CRM activity routes
+ *
+ * These routes must be before /:id routes.
+ */
 router.get('/:storeId/crm-activities', auth, listStoreCrmActivities);
 router.post('/:storeId/crm-activities', auth, createStoreCrmActivity);
+
 router.patch(
   '/:storeId/crm-activities/:activityId',
   auth,
   updateStoreCrmActivity
 );
+
 router.delete(
   '/:storeId/crm-activities/:activityId',
   auth,
   deleteStoreCrmActivity
 );
 
-router.get('/:storeId/crm-analysis/latest', auth, getLatestStoreCrmAnalysis);
-router.get('/:storeId/crm-analysis', auth, listStoreCrmAnalyses);
-router.post('/:storeId/crm-analysis/run', auth, analyzeStoreCrm);
-
+/**
+ * Single store routes
+ *
+ * Keep these after all custom /:storeId/... routes.
+ */
 router.get('/:id', auth, getStoreById);
 router.patch('/:id', auth, updateStore);
 router.delete('/:id', auth, deleteStore);

@@ -9,6 +9,7 @@ def build_llm():
 
 def create_blog_crew(payload):
     topic = payload["topic"]
+    requested_title = payload.get("title", "")
     audience = payload.get("audience", "general readers")
     tone = payload.get("tone", "clear and practical")
     keywords = payload.get("keywords", [])
@@ -18,18 +19,24 @@ def create_blog_crew(payload):
     llm = build_llm()
 
     strategist = Agent(
-        role="Blog Strategist",
-        goal="Create a sharp angle and structure for a high-quality blog post.",
-        backstory="You turn broad ideas into focused, useful blog strategies.",
+        role="SEO Blog Strategist",
+        goal="Create a focused SEO blog strategy with title and keywords.",
+        backstory=(
+            "You create publication-ready blog strategies. "
+            "You avoid generic writing and focus on practical search intent."
+        ),
         llm=llm,
         verbose=False,
         allow_delegation=False,
     )
 
     writer = Agent(
-        role="Blog Writer",
+        role="SEO Blog Writer",
         goal="Write a strong, readable, useful blog post.",
-        backstory="You write practical articles with clear headings, useful examples, and minimal fluff.",
+        backstory=(
+            "You write practical articles with clear headings, useful examples, "
+            "SEO alignment, and minimal fluff."
+        ),
         llm=llm,
         verbose=False,
         allow_delegation=False,
@@ -37,7 +44,7 @@ def create_blog_crew(payload):
 
     publisher = Agent(
         role="Structured Blog Publisher",
-        goal="Publish the final blog output as strict JSON for application storage.",
+        goal="Return the final blog as strict JSON for application storage.",
         backstory="You output strict JSON only. No markdown fences. No commentary.",
         llm=llm,
         verbose=False,
@@ -47,28 +54,40 @@ def create_blog_crew(payload):
     outline_task = Task(
         description=(
             f"Topic: {topic}\n"
+            f"Requested title, if provided: {requested_title or 'None'}\n"
             f"Audience: {audience}\n"
             f"Tone: {tone}\n"
-            f"Keywords: {', '.join(keywords) if keywords else 'None'}\n\n"
-            "Create:\n"
-            "1. A strong SEO-friendly title\n"
-            "2. A short article angle\n"
-            "3. A section-by-section outline\n"
-            "4. Key points to include\n"
+            f"Target keywords: {', '.join(keywords) if keywords else 'None'}\n\n"
+            "Create a blog strategy with:\n"
+            "1. A publication-ready SEO title.\n"
+            "2. A focused search intent.\n"
+            "3. A relevant keyword set.\n"
+            "4. A section-by-section outline.\n"
+            "5. Key arguments and examples to include.\n\n"
+            "Rules:\n"
+            "- If a requested title is provided, keep its meaning and improve only if needed.\n"
+            "- Do not invent fake statistics.\n"
+            "- Do not add external or internal links unless explicitly required by the final article context.\n"
         ),
-        expected_output="A clear blog title and article outline.",
+        expected_output="A clear blog strategy, title, keywords, and outline.",
         agent=strategist,
     )
 
     writing_task = Task(
         description=(
-            f"Write the final blog post on '{topic}'.\n"
+            f"Write the final blog post.\n\n"
+            f"Topic: {topic}\n"
             f"Audience: {audience}\n"
             f"Tone: {tone}\n"
-            f"Target length: between {min_words} and {max_words} words.\n"
-            "Use markdown formatting.\n"
-            "Include a strong introduction, useful body sections, and a strong conclusion.\n"
-            "Do not include markdown code fences.\n"
+            f"Target length: between {min_words} and {max_words} words.\n\n"
+            "Writing rules:\n"
+            "1. Use markdown formatting.\n"
+            "2. Include a strong introduction.\n"
+            "3. Use practical H2/H3 sections.\n"
+            "4. Include a strong conclusion.\n"
+            "5. Do not use markdown code fences.\n"
+            "6. Do not add fake data.\n"
+            "7. Avoid vague SaaS buzzwords unless they add meaning.\n"
         ),
         expected_output="A complete markdown blog post.",
         agent=writer,
@@ -89,14 +108,13 @@ def create_blog_crew(payload):
             "}\n\n"
             "Rules:\n"
             "1. Output JSON only.\n"
-            "2. title must be specific and publication-ready.\n"
-            "3. meta_description must be concise and useful.\n"
-            "4. excerpt must be 1 short paragraph.\n"
-            "5. suggested_keywords must be a small relevant array.\n"
-            "6. content_markdown must contain the full final blog markdown.\n"
-            "7. telegram_report must summarize the generated article in a short editor-friendly format.\n"
-            "8. No markdown fences.\n"
-            "9. No commentary outside the JSON.\n"
+            "2. No markdown fences.\n"
+            "3. No commentary outside JSON.\n"
+            "4. title must be specific and publication-ready.\n"
+            "5. meta_description must be useful and max 160 characters.\n"
+            "6. suggested_keywords must include relevant keywords from the article.\n"
+            "7. content_markdown must contain the full final blog markdown.\n"
+            "8. telegram_report must be short and editor-friendly.\n"
         ),
         expected_output="A strict JSON object containing final blog fields.",
         agent=publisher,

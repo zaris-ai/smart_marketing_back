@@ -135,7 +135,10 @@ function buildUpdatePayload(raw = {}) {
   if (raw.name !== undefined) payload.name = cleanString(raw.name);
   if (raw.domain !== undefined) payload.domain = normalizeDomain(raw.domain);
   if (raw.country !== undefined) payload.country = cleanString(raw.country);
-  if (raw.contactName !== undefined) payload.contactName = cleanString(raw.contactName);
+
+  if (raw.contactName !== undefined) {
+    payload.contactName = cleanString(raw.contactName);
+  }
 
   if (raw.contactEmail !== undefined) {
     payload.contactEmail = cleanString(raw.contactEmail).toLowerCase();
@@ -211,7 +214,9 @@ function buildImportedStorePayload(raw = {}) {
 
   if (websiteIpAddress) notesParts.push(`IP: ${websiteIpAddress}`);
   if (webHostingCompany) notesParts.push(`Hosting: ${webHostingCompany}`);
-  if (worldSitePopularRating) notesParts.push(`Rating: ${worldSitePopularRating}`);
+  if (worldSitePopularRating) {
+    notesParts.push(`Rating: ${worldSitePopularRating}`);
+  }
 
   const now = new Date();
 
@@ -227,7 +232,7 @@ function buildImportedStorePayload(raw = {}) {
     isChecked: importedIsChecked,
     checkedAt: importedIsChecked ? now : null,
     metadata: {
-      source: 'json_replace_import',
+      source: 'json_append_import',
       originalNo: cleanString(raw.no),
       websiteIpAddress,
       webHostingCompany,
@@ -257,63 +262,6 @@ function validateImportedStore(payload) {
   }
 
   return null;
-}
-
-async function collectionExists(collectionName) {
-  const collections = await mongoose.connection.db
-    .listCollections({ name: collectionName })
-    .toArray();
-
-  return collections.length > 0;
-}
-
-async function createStoreIndexes(collection) {
-  await collection.createIndex({ domain: 1 }, { unique: true });
-  await collection.createIndex({ createdAt: -1 });
-  await collection.createIndex({ updatedAt: -1 });
-  await collection.createIndex({ checkedAt: -1 });
-  await collection.createIndex({ isChecked: 1, createdAt: -1 });
-  await collection.createIndex({ isActive: 1, createdAt: -1 });
-  await collection.createIndex({ country: 1, createdAt: -1 });
-  await collection.createIndex({ name: 'text', domain: 'text', contactEmail: 'text' });
-}
-
-function getWriteErrors(error) {
-  return (
-    error?.writeErrors ||
-    error?.result?.result?.writeErrors ||
-    error?.result?.writeErrors ||
-    []
-  );
-}
-
-function hasOnlyDuplicateKeyErrors(error) {
-  const writeErrors = getWriteErrors(error);
-
-  if (!writeErrors.length) {
-    return error?.code === 11000;
-  }
-
-  return writeErrors.every((item) => item?.code === 11000);
-}
-
-function getBulkInsertedCount(error) {
-  return (
-    error?.result?.insertedCount ||
-    error?.result?.result?.nInserted ||
-    error?.insertedDocs?.length ||
-    0
-  );
-}
-
-function getDuplicateWriteErrorCount(error) {
-  const writeErrors = getWriteErrors(error);
-
-  if (!writeErrors.length && error?.code === 11000) {
-    return 1;
-  }
-
-  return writeErrors.filter((item) => item?.code === 11000).length;
 }
 
 async function* readTopLevelJsonArrayObjects(filePath) {
@@ -438,7 +386,9 @@ async function* readTopLevelJsonArrayObjects(filePath) {
   }
 
   if (!arrayStarted) {
-    throw createImportFileError('JSON file is empty or missing a top-level array.');
+    throw createImportFileError(
+      'JSON file is empty or missing a top-level array.'
+    );
   }
 
   if (collectingObject || objectDepth !== 0 || insideString) {
@@ -446,7 +396,9 @@ async function* readTopLevelJsonArrayObjects(filePath) {
   }
 
   if (!arrayEnded) {
-    throw createImportFileError('JSON file ended before the top-level array was closed.');
+    throw createImportFileError(
+      'JSON file ended before the top-level array was closed.'
+    );
   }
 }
 
@@ -692,16 +644,8 @@ export async function deleteStore(req, res) {
   }
 }
 
-export async function replaceStoresFromJson(req, res) {
+export async function importStoresFromJson(req, res) {
   const uploadedPath = req.file?.path;
-  const db = mongoose.connection.db;
-  const targetCollectionName = Store.collection.collectionName;
-
-  const importId = `${Date.now()}_${Math.random().toString(16).slice(2)}`;
-  const tempCollectionName = `${targetCollectionName}_import_${importId}`;
-  const backupCollectionName = `${targetCollectionName}_backup_${importId}`;
-
-  let tempCollectionPromoted = false;
 
   try {
     if (!req.file) {
@@ -711,10 +655,6 @@ export async function replaceStoresFromJson(req, res) {
       });
     }
 
-    const tempCollection = db.collection(tempCollectionName);
-
-    await createStoreIndexes(tempCollection);
-
     const invalidRows = [];
     const INVALID_ROWS_LIMIT = 200;
     const BATCH_SIZE = 1000;
@@ -723,7 +663,8 @@ export async function replaceStoresFromJson(req, res) {
     let totalRows = 0;
     let validRows = 0;
     let insertedCount = 0;
-    let duplicateInFileCount = 0;
+    let skippedExistingCount = 0;
+    let duplicateInBatchCount = 0;
     let invalidCount = 0;
 
     async function flushBatch() {
@@ -732,20 +673,41 @@ export async function replaceStoresFromJson(req, res) {
       const currentBatch = batch;
       batch = [];
 
-      try {
-        const result = await tempCollection.insertMany(currentBatch, {
-          ordered: false,
-        });
+      const uniqueByDomain = new Map();
 
-        insertedCount += result?.insertedCount || currentBatch.length;
-      } catch (error) {
-        if (!hasOnlyDuplicateKeyErrors(error)) {
-          throw error;
+      for (const payload of currentBatch) {
+        if (uniqueByDomain.has(payload.domain)) {
+          duplicateInBatchCount += 1;
+          continue;
         }
 
-        insertedCount += getBulkInsertedCount(error);
-        duplicateInFileCount += getDuplicateWriteErrorCount(error);
+        uniqueByDomain.set(payload.domain, payload);
       }
+
+      const uniquePayloads = Array.from(uniqueByDomain.values());
+
+      if (!uniquePayloads.length) return;
+
+      const operations = uniquePayloads.map((payload) => ({
+        updateOne: {
+          filter: {
+            domain: payload.domain,
+          },
+          update: {
+            $setOnInsert: payload,
+          },
+          upsert: true,
+        },
+      }));
+
+      const result = await Store.collection.bulkWrite(operations, {
+        ordered: false,
+      });
+
+      const batchInserted = result?.upsertedCount || 0;
+
+      insertedCount += batchInserted;
+      skippedExistingCount += uniquePayloads.length - batchInserted;
     }
 
     for await (const row of readTopLevelJsonArrayObjects(uploadedPath)) {
@@ -792,96 +754,49 @@ export async function replaceStoresFromJson(req, res) {
     await flushBatch();
 
     if (!totalRows) {
-      await tempCollection.drop();
-
       return res.status(400).json({
         ok: false,
         error: 'JSON file has no rows',
       });
     }
 
-    if (!insertedCount) {
-      await tempCollection.drop();
-
+    if (!validRows) {
       return res.status(400).json({
         ok: false,
-        error: 'No valid stores found. Existing stores were not changed.',
+        error: 'No valid stores found for import',
         data: {
           totalRows,
           validRows,
           insertedCount,
-          duplicateInFileCount,
+          skippedExistingCount,
+          duplicateInBatchCount,
           invalidCount,
           invalidRows,
         },
       });
     }
 
-    const targetExists = await collectionExists(targetCollectionName);
-
-    if (targetExists) {
-      await db.collection(targetCollectionName).rename(backupCollectionName, {
-        dropTarget: true,
-      });
-    }
-
-    try {
-      await tempCollection.rename(targetCollectionName, {
-        dropTarget: true,
-      });
-
-      tempCollectionPromoted = true;
-
-      const backupExists = await collectionExists(backupCollectionName);
-
-      if (targetExists && backupExists) {
-        await db.collection(backupCollectionName).drop();
-      }
-    } catch (replaceError) {
-      const targetStillExists = await collectionExists(targetCollectionName);
-      const backupExists = await collectionExists(backupCollectionName);
-
-      if (!targetStillExists && backupExists) {
-        await db.collection(backupCollectionName).rename(targetCollectionName, {
-          dropTarget: true,
-        });
-      }
-
-      throw replaceError;
-    }
-
     return res.status(201).json({
       ok: true,
-      message: 'Stores replaced successfully from JSON file',
+      message: 'Stores imported successfully',
       data: {
         totalRows,
         validRows,
         insertedCount,
-        duplicateInFileCount,
+        skippedExistingCount,
+        duplicateInBatchCount,
         invalidCount,
         invalidRows,
       },
     });
   } catch (error) {
-    console.error('replaceStoresFromJson error:', error);
-
-    if (!tempCollectionPromoted) {
-      try {
-        if (await collectionExists(tempCollectionName)) {
-          await db.collection(tempCollectionName).drop();
-        }
-      } catch (cleanupError) {
-        console.error('Temp collection cleanup error:', cleanupError);
-      }
-    }
+    console.error('importStoresFromJson error:', error);
 
     const statusCode = error.statusCode || 500;
 
     return res.status(statusCode).json({
       ok: false,
-      error:
-        error.message ||
-        'Failed to replace stores from JSON. Existing stores were not changed.',
+      error: error.message || 'Failed to import stores from JSON',
     });
   } finally {
     if (uploadedPath) {
