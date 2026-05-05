@@ -192,7 +192,7 @@ function normalizeBlogResult(rawContent, payload) {
 
 function toBlogResponse(blog) {
   return {
-    _id: blog._id,
+    _id: String(blog._id),
     title: blog.title,
     normalizedTitle: blog.normalizedTitle,
     slug: blog.slug,
@@ -331,15 +331,15 @@ export async function createBlog(req, res, next) {
     const runId = randomUUID();
     const slug = await makeUniqueSlug(normalized.title);
 
-    const blog = await AiBlog.create({
+    const savedBlog = await AiBlog.create({
       title: normalized.title,
       slug,
       topic: payload.topic,
       audience: payload.audience,
       appName: req.body.appName || 'Arka: Smart Analyzer',
 
-      // Required by your current model.
-      // Not exposed in frontend anymore.
+      // Required by your existing model.
+      // Hidden from frontend.
       sourceLinks: getRequiredModelSourceLinks(),
 
       suggestedKeywords: normalized.suggestedKeywords,
@@ -354,7 +354,10 @@ export async function createBlog(req, res, next) {
         html: normalized.contentHtml,
       },
 
+      // Your current model enum only allows this.
       decisionSource: 'auto_from_links',
+
+      // Your current model allows this string even though default is blog_from_links.
       crewName: 'blog',
 
       rawResult: {
@@ -373,11 +376,10 @@ export async function createBlog(req, res, next) {
       message: 'Blog created and saved successfully',
       data: {
         runId,
-        blog: toBlogResponse(blog),
-
+        blog: toBlogResponse(savedBlog),
         result: {
-          content: blog.contentMarkdown,
-          html: blog.contentHtml,
+          content: savedBlog.contentMarkdown,
+          html: savedBlog.contentHtml,
           telegram_report: normalized.telegramReport,
         },
       },
