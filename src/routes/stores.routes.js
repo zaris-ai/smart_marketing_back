@@ -19,6 +19,7 @@ import {
   createStoreCrmActivity,
   updateStoreCrmActivity,
   deleteStoreCrmActivity,
+  analyzeStoreCrmActivities,
 } from '../controllers/stores/storeCrm.controller.js';
 
 const router = express.Router();
@@ -81,6 +82,14 @@ router.post('/import-json', auth, upload.single('file'), importStoresFromJson);
  */
 router.get('/:storeId/crm-activities', auth, listStoreCrmActivities);
 router.post('/:storeId/crm-activities', auth, createStoreCrmActivity);
+
+/**
+ * Store CRM background analysis route
+ *
+ * Queues store_crm_analysis crew in BullMQ.
+ * Keep this before /:id routes.
+ */
+router.post('/:storeId/crm-activities/analyze', auth, analyzeStoreCrmActivities);
 
 router.patch(
   '/:storeId/crm-activities/:activityId',

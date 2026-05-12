@@ -1,17 +1,12 @@
 import slugify from 'slugify';
+
 import AiBlog, { normalizeTitle } from '../../models/ai-blog.model.js';
-import { runPythonCrew } from '../../services/pythonRunner.service.js';
-import { publishCrewReport } from '../../services/telegram.service.js';
+import { enqueueCrewRun } from '../../services/backgroundCrew.service.js';
 
-function safeJsonParse(value) {
-  if (!value || typeof value !== 'string') return null;
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
+const DEFAULT_SOURCE_LINKS = [
+  'https://web.arkaanalyzer.com/',
+  'https://apps.shopify.com/arka-smart-analyzer',
+];
 
 function requireTwoLinks(links) {
   if (!Array.isArray(links) || links.length !== 2) {
@@ -32,11 +27,13 @@ function requireTwoLinks(links) {
 }
 
 function buildBaseSlug(title = 'untitled-blog') {
-  return slugify(title, {
+  const base = slugify(title, {
     lower: true,
     strict: true,
     trim: true,
   });
+
+  return base || 'untitled-blog';
 }
 
 async function ensureUniqueSlug(baseSlug, currentId = null) {
@@ -55,7 +52,7 @@ async function ensureUniqueSlug(baseSlug, currentId = null) {
   return slug;
 }
 
-async function getExistingTitles(limit = 200) {
+async function getExistingTitles(limit = 300) {
   const docs = await AiBlog.find({}, { title: 1, _id: 0 })
     .sort({ createdAt: -1 })
     .limit(limit)
@@ -78,176 +75,77 @@ async function isDuplicateTitle(title, excludeId = null) {
   return Boolean(await AiBlog.exists(query));
 }
 
-function buildAiBlogTelegramReport(doc) {
-  const keywords = Array.isArray(doc.suggestedKeywords)
-    ? doc.suggestedKeywords.slice(0, 6).map((item) => `• ${item}`).join('\n')
-    : '';
+function normalizeKeywordArray(value) {
+  if (!Array.isArray(value)) return [];
 
-  const sources = Array.isArray(doc.sourceLinks)
-    ? doc.sourceLinks.slice(0, 2).map((item) => `• ${item}`).join('\n')
-    : '';
+  return value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+}
 
-  return [
-    `AI Blog Draft: ${doc.title}`,
-    `Topic: ${doc.topic}`,
-    `Audience: ${doc.audience}`,
-    `App: ${doc.appName}`,
-    '',
-    'Summary',
-    doc.excerpt || 'A new AI blog draft was generated successfully and saved for review.',
-    '',
-    keywords ? `Keywords\n${keywords}` : '',
-    sources ? `Source Links\n${sources}` : '',
-    '',
-    `Status: ${doc.status}`,
-    `Slug: ${doc.slug}`,
-  ]
-    .filter(Boolean)
-    .join('\n');
+function normalizeSourceLinks(value) {
+  if (!Array.isArray(value)) return DEFAULT_SOURCE_LINKS;
+
+  const links = value
+    .map((item) => String(item || '').trim())
+    .filter(Boolean);
+
+  return links.length ? links : DEFAULT_SOURCE_LINKS;
+}
+
+function serializeRun(run) {
+  return {
+    _id: String(run._id),
+    crewName: run.crewName,
+    title: run.title || '',
+    status: run.status,
+    savedRecord: run.savedRecord || null,
+    createdAt: run.createdAt,
+    startedAt: run.startedAt || null,
+    finishedAt: run.finishedAt || null,
+    error: run.error || {
+      message: '',
+      stack: '',
+    },
+  };
 }
 
 export async function createAiBlog(req, res, next) {
   try {
     requireTwoLinks(req.body.links);
 
+    const links = normalizeSourceLinks(req.body.links);
     const existingTitles = await getExistingTitles(300);
 
     const payload = {
-      links: req.body.links,
+      links,
       forbidden_titles: existingTitles,
     };
 
-    let result = await runPythonCrew({
+    const run = await enqueueCrewRun({
       crewName: 'blog_from_links',
+      title: 'AI Blog Draft From Source Links',
       payload,
+      meta: {
+        sourceLinks: links,
+        appName: 'Arka: Smart Analyzer',
+        forbiddenTitlesCount: existingTitles.length,
+        executedByName: req.user?.name || req.user?.email || 'Unknown user',
+      },
+      userId: req.user?._id || null,
     });
 
-    let parsed = safeJsonParse(result?.result?.content);
-
-    if (!parsed) {
-      return res.status(500).json({
-        ok: false,
-        message: 'Crew returned invalid JSON content',
-        raw: result?.result?.content,
-      });
-    }
-
-    if (!parsed.title || !parsed.content_html || !parsed.topic) {
-      return res.status(500).json({
-        ok: false,
-        message: 'Crew response is missing required blog fields',
-        data: parsed,
-      });
-    }
-
-    if (await isDuplicateTitle(parsed.title)) {
-      result = await runPythonCrew({
-        crewName: 'blog_from_links',
-        payload: {
-          ...payload,
-          retry_reason: `The generated title "${parsed.title}" already exists. Choose a substantially different title.`,
-          forbidden_titles: [...existingTitles, parsed.title],
-        },
-      });
-
-      parsed = safeJsonParse(result?.result?.content);
-
-      if (!parsed || !parsed.title || !parsed.content_html || !parsed.topic) {
-        return res.status(500).json({
-          ok: false,
-          message: 'Crew retry returned invalid or incomplete JSON content',
-          raw: result?.result?.content,
-        });
-      }
-
-      if (await isDuplicateTitle(parsed.title)) {
-        return res.status(409).json({
-          ok: false,
-          message: 'Crew generated a duplicate blog title more than once. Try again.',
-          data: {
-            title: parsed.title,
-          },
-        });
-      }
-    }
-
-    const baseSlug = buildBaseSlug(parsed.slug || parsed.title);
-    const uniqueSlug = await ensureUniqueSlug(baseSlug);
-
-    const doc = await AiBlog.create({
-      title: parsed.title,
-      normalizedTitle: normalizeTitle(parsed.title),
-      slug: uniqueSlug,
-      topic: parsed.topic,
-      audience: parsed.audience || 'Shopify merchants',
-      appName: parsed.app_name || 'Arka: Smart Analyzer',
-      sourceLinks: payload.links,
-      suggestedKeywords: Array.isArray(parsed.keywords) ? parsed.keywords : [],
-      metaDescription: parsed.meta_description || '',
-      excerpt: parsed.excerpt || '',
-      coverImage: {
-        url: parsed.cover_image?.url || '',
-        sourcePage: parsed.cover_image?.source_page || '',
-        query: parsed.cover_image?.query || '',
-        alt: parsed.cover_image?.alt || '',
-      },
-      contentHtml: parsed.content_html,
-      contentMarkdown: parsed.content_markdown || '',
-      editorData: parsed.editor_data || {
-        type: 'html',
-        content: parsed.content_html,
-      },
-      crewName: 'blog_from_links',
-      rawResult: result,
-      status: 'draft',
-      generatedAt: new Date(),
-    });
-
-    try {
-      const telegramReport = buildAiBlogTelegramReport(doc);
-
-      const telegram = await publishCrewReport({
-        crewName: 'blog_from_links',
-        executedBy: req.user || null,
-        createdAt: doc.createdAt || new Date(),
-        savedId: doc._id.toString(),
-        sourceFile: doc.slug || 'blog_from_links',
-        html: doc.contentHtml || '',
-        telegramReport,
-      });
-
-      doc.telegram = {
-        published: !telegram?.skipped && !!telegram?.ok,
-        channelId: process.env.TELEGRAM_CHANNEL_ID || '',
-        messageIds: telegram?.messages?.map((m) => m.messageId) || [],
-        publishedAt: telegram?.ok ? new Date() : null,
-        html: telegram?.reportHtml || '',
-        error: '',
-      };
-
-      await doc.save();
-    } catch (telegramError) {
-      console.error('ai blog telegram publish failed:', telegramError);
-
-      doc.telegram = {
-        published: false,
-        channelId: process.env.TELEGRAM_CHANNEL_ID || '',
-        messageIds: [],
-        publishedAt: null,
-        html: '',
-        error: telegramError.message || 'Telegram publish failed',
-      };
-
-      await doc.save();
-    }
-
-    return res.status(201).json({
+    return res.status(202).json({
       ok: true,
-      message: 'AI blog generated and saved as draft',
-      data: doc,
+      success: true,
+      message: 'AI blog generation queued successfully',
+      data: {
+        run: serializeRun(run),
+        runId: String(run._id),
+      },
     });
   } catch (error) {
-    console.error(error);
+    console.error('createAiBlog error:', error);
     next(error);
   }
 }
@@ -257,6 +155,7 @@ export async function getAiBlogs(req, res, next) {
     const { status, limit = 20, page = 1 } = req.query;
 
     const query = {};
+
     if (status && ['draft', 'published'].includes(status)) {
       query.status = status;
     }
@@ -276,6 +175,7 @@ export async function getAiBlogs(req, res, next) {
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'AI blogs fetched successfully',
       data: {
         items,
@@ -300,12 +200,14 @@ export async function getAiBlogById(req, res, next) {
     if (!doc) {
       return res.status(404).json({
         ok: false,
+        success: false,
         message: 'AI blog not found',
       });
     }
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'AI blog fetched successfully',
       data: doc,
     });
@@ -326,6 +228,7 @@ export async function updateAiBlogDraft(req, res, next) {
       if (await isDuplicateTitle(trimmedTitle, currentId)) {
         return res.status(409).json({
           ok: false,
+          success: false,
           message: 'A blog with this title already exists.',
         });
       }
@@ -350,7 +253,9 @@ export async function updateAiBlogDraft(req, res, next) {
     }
 
     if (Array.isArray(req.body.suggestedKeywords)) {
-      updates.suggestedKeywords = req.body.suggestedKeywords.filter(Boolean);
+      updates.suggestedKeywords = normalizeKeywordArray(
+        req.body.suggestedKeywords
+      );
     }
 
     if (typeof req.body.contentHtml === 'string') {
@@ -382,12 +287,14 @@ export async function updateAiBlogDraft(req, res, next) {
     if (!doc) {
       return res.status(404).json({
         ok: false,
+        success: false,
         message: 'AI blog not found',
       });
     }
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'AI blog draft updated successfully',
       data: doc,
     });
@@ -411,12 +318,14 @@ export async function publishAiBlog(req, res, next) {
     if (!doc) {
       return res.status(404).json({
         ok: false,
+        success: false,
         message: 'AI blog not found',
       });
     }
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'AI blog published successfully',
       data: doc,
     });
@@ -440,12 +349,14 @@ export async function unpublishAiBlog(req, res, next) {
     if (!doc) {
       return res.status(404).json({
         ok: false,
+        success: false,
         message: 'AI blog not found',
       });
     }
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'AI blog moved back to draft',
       data: doc,
     });
@@ -462,12 +373,14 @@ export async function deleteAiBlog(req, res, next) {
     if (!doc) {
       return res.status(404).json({
         ok: false,
+        success: false,
         message: 'AI blog not found',
       });
     }
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'AI blog deleted successfully',
       data: doc,
     });
@@ -487,6 +400,7 @@ export async function updateAiBlog(req, res, next) {
     if (!existingDoc) {
       return res.status(404).json({
         ok: false,
+        success: false,
         message: 'AI blog not found',
       });
     }
@@ -497,6 +411,7 @@ export async function updateAiBlog(req, res, next) {
       if (await isDuplicateTitle(trimmedTitle, currentId)) {
         return res.status(409).json({
           ok: false,
+          success: false,
           message: 'A blog with this title already exists.',
         });
       }
@@ -534,15 +449,13 @@ export async function updateAiBlog(req, res, next) {
     }
 
     if (Array.isArray(req.body.suggestedKeywords)) {
-      updates.suggestedKeywords = req.body.suggestedKeywords
-        .map((item) => String(item).trim())
-        .filter(Boolean);
+      updates.suggestedKeywords = normalizeKeywordArray(
+        req.body.suggestedKeywords
+      );
     }
 
     if (Array.isArray(req.body.sourceLinks)) {
-      updates.sourceLinks = req.body.sourceLinks
-        .map((item) => String(item).trim())
-        .filter(Boolean);
+      updates.sourceLinks = normalizeSourceLinks(req.body.sourceLinks);
     }
 
     if (typeof req.body.contentHtml === 'string') {
@@ -573,6 +486,7 @@ export async function updateAiBlog(req, res, next) {
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message:
         doc.status === 'published'
           ? 'Published AI blog updated successfully'

@@ -8,17 +8,7 @@ import {
   listEmails,
   listLabels,
 } from '../../services/gmail.service.js';
-import { runPythonCrew } from '../../services/pythonRunner.service.js';
-
-function safeJsonParse(value) {
-  if (!value || typeof value !== 'string') return null;
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
+import { enqueueCrewRun } from '../../services/backgroundCrew.service.js';
 
 function normalizeString(value) {
   if (typeof value !== 'string') return '';
@@ -33,44 +23,6 @@ function getReadableBody(message) {
     normalizeString(message.snippet) ||
     'No readable plain-text body found.'
   );
-}
-
-function validateCrewResponse(parsed) {
-  if (!parsed || typeof parsed !== 'object') {
-    const error = new Error('Crew returned invalid JSON content');
-    error.statusCode = 500;
-    throw error;
-  }
-
-  if (!parsed.contact || typeof parsed.contact !== 'object') {
-    const error = new Error('Crew response is missing contact section');
-    error.statusCode = 500;
-    throw error;
-  }
-
-  if (!parsed.analysis || typeof parsed.analysis !== 'object') {
-    const error = new Error('Crew response is missing analysis section');
-    error.statusCode = 500;
-    throw error;
-  }
-
-  if (!parsed.reply || typeof parsed.reply !== 'object') {
-    const error = new Error('Crew response is missing reply section');
-    error.statusCode = 500;
-    throw error;
-  }
-
-  if (!String(parsed.reply.subject || '').trim()) {
-    const error = new Error('Crew response is missing reply.subject');
-    error.statusCode = 500;
-    throw error;
-  }
-
-  if (!String(parsed.reply.body_text || '').trim()) {
-    const error = new Error('Crew response is missing reply.body_text');
-    error.statusCode = 500;
-    throw error;
-  }
 }
 
 function buildEmailDbPayload(email, thread = null) {
@@ -464,37 +416,16 @@ export const analyzeMyEmailById = asyncHandler(async (req, res) => {
       'reply clearly and move the conversation to the next useful step',
   };
 
-  const result = await runPythonCrew({
-    crewName: 'marketing_email_reply',
-    payload,
-  });
-
-  const rawContent = result?.result?.content || '';
-  const parsed = safeJsonParse(rawContent);
-
-  validateCrewResponse(parsed);
-
   const dbPayload = buildEmailDbPayload(email, thread);
 
-  const saved = await GmailEmail.findOneAndUpdate(
+  const savedEmail = await GmailEmail.findOneAndUpdate(
     { gmailId: email.id },
     {
-      $set: {
-        ...dbPayload,
-        latestAnalysis: parsed,
-      },
+      $set: dbPayload,
       $setOnInsert: {
         status: 'unread',
         answerStatus: 'not_answered',
         localTags: [],
-      },
-      $push: {
-        analysisHistory: {
-          analyzedAt: new Date(),
-          crewName: 'marketing_email_reply',
-          payload,
-          result: parsed,
-        },
       },
     },
     {
@@ -503,11 +434,31 @@ export const analyzeMyEmailById = asyncHandler(async (req, res) => {
     }
   );
 
-  res.json({
+  const run = await enqueueCrewRun({
+    crewName: 'marketing_email_reply',
+    title: `Analyze email: ${email.subject || email.from || email.id}`,
+    payload,
+    meta: {
+      gmailEmailId: savedEmail._id,
+      gmailId: email.id,
+      threadId: email.threadId || '',
+      subject: email.subject || '',
+      from: email.from || '',
+    },
+    userId: req.user?._id || null,
+  });
+
+  return res.status(202).json({
     success: true,
-    message: 'Contact form email analyzed successfully',
-    data: parsed,
-    savedEmail: saved,
+    ok: true,
+    message: 'Email analysis started in background',
+    data: {
+      runId: run._id,
+      status: run.status,
+      crewName: run.crewName,
+      createdAt: run.createdAt,
+    },
+    savedEmail,
     meta: {
       crewName: 'marketing_email_reply',
       emailId: email.id,

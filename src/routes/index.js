@@ -18,6 +18,7 @@ import gmailRoutes from './gmail.routes.js';
 import instagramAgentRoutes from './instagram-agent.routes.js';
 import instagramPostAgentRoutes from './instagram-post-agent.routes.js';
 import uploadRoutes from './upload.routes.js';
+import backgroundRunsRoutes from './background-runs.routes.js';
 
 const router = Router();
 
@@ -40,5 +41,6 @@ router.use('/gmail', gmailRoutes);
 router.use('/instagram-agent', instagramAgentRoutes);
 router.use('/instagram-post-agent', instagramPostAgentRoutes);
 router.use('/upload', uploadRoutes);
+router.use('/background-runs', backgroundRunsRoutes);
 
 export default router;

@@ -1,60 +1,11 @@
 import ProblemDiscoveryRun from '../../models/problem-discovery-run.model.js';
-import { runPythonCrew } from '../../services/pythonRunner.service.js';
-import { publishCrewReport } from '../../services/telegram.service.js';
+import { enqueueCrewRun } from '../../services/backgroundCrew.service.js';
 import {
   normalizeMaxResults,
   requireUrls,
-  validateProblemDiscoveryResponse,
 } from './problem-discovery.validator.js';
 
 const DEFAULT_APP_REFERENCE_URL = 'https://apps.shopify.com/arka-smart-analyzer';
-
-function safeJsonParse(value) {
-  if (!value || typeof value !== 'string') return null;
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
-}
-
-function buildProblemDiscoveryTelegramReport(doc, parsed) {
-  const items = Array.isArray(parsed?.items) ? parsed.items : [];
-  const summary = parsed?.summary || {};
-  const acceptedCount =
-    typeof summary.accepted_count === 'number' ? summary.accepted_count : items.length;
-  const totalCandidates =
-    typeof summary.total_candidates === 'number'
-      ? summary.total_candidates
-      : items.length;
-
-  const topItems = items.slice(0, 5).map((item) => {
-    const category = item?.pain_category || 'unknown';
-    const solve = item?.can_arka_solve ? 'Arka can solve now' : 'Arka gap';
-    return `• [${category}] ${item?.question || 'Untitled question'} — ${solve}`;
-  });
-
-  const sources = [...new Set(items.map((item) => item?.source).filter(Boolean))]
-    .slice(0, 5)
-    .map((source) => `• ${source}`);
-
-  return [
-    `Problem Discovery Run`,
-    `Accepted: ${acceptedCount}`,
-    `Total candidates: ${totalCandidates}`,
-    '',
-    'Summary',
-    doc?.sourceUrls?.length
-      ? `Analyzed ${doc.sourceUrls.length} submitted source URL(s) and extracted merchant problems/questions.`
-      : 'A new problem discovery run was generated successfully.',
-    '',
-    topItems.length ? `Top Items\n${topItems.join('\n')}` : '',
-    sources.length ? `Sources\n${sources.join('\n')}` : '',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
 
 export async function createProblemDiscoveryRun(req, res, next) {
   try {
@@ -66,83 +17,28 @@ export async function createProblemDiscoveryRun(req, res, next) {
       max_results: normalizeMaxResults(req.body.max_results, 20),
     };
 
-    const result = await runPythonCrew({
+    const run = await enqueueCrewRun({
       crewName: 'problem_discovery',
+      title: 'Problem Discovery Run',
       payload,
-    });
-
-    const parsed = safeJsonParse(result?.result?.content);
-
-    if (!parsed) {
-      return res.status(500).json({
-        ok: false,
-        message: 'Crew returned invalid JSON content',
-        raw: result?.result?.content,
-      });
-    }
-
-    validateProblemDiscoveryResponse(parsed);
-
-    const doc = await ProblemDiscoveryRun.create({
-      sourceUrls: payload.urls,
-      appReferenceUrl: payload.app_reference_url,
-      maxResults: payload.max_results,
-      items: parsed.items,
-      summary: parsed.summary || {
-        total_candidates: parsed.items.length,
-        accepted_count: parsed.items.length,
+      meta: {
+        sourceUrls: payload.urls,
+        appReferenceUrl: payload.app_reference_url,
+        maxResults: payload.max_results,
       },
-      crewName: 'problem_discovery',
-      rawResult: result,
-      generatedAt: new Date(),
+      userId: req.user?._id || null,
     });
 
-    try {
-      const telegramReport = buildProblemDiscoveryTelegramReport(doc, parsed);
-
-      const telegram = await publishCrewReport({
-        crewName: 'problem_discovery',
-        executedBy: req.user || null,
-        createdAt: doc.createdAt || new Date(),
-        savedId: doc._id.toString(),
-        sourceFile: 'problem_discovery',
-        html: '',
-        telegramReport,
-      });
-
-      if (doc.telegram !== undefined || doc.schema?.path?.('telegram')) {
-        doc.telegram = {
-          published: !telegram?.skipped && !!telegram?.ok,
-          channelId: process.env.TELEGRAM_CHANNEL_ID || '',
-          messageIds: telegram?.messages?.map((m) => m.messageId) || [],
-          publishedAt: telegram?.ok ? new Date() : null,
-          reportHtml: telegram?.reportHtml || '',
-          error: '',
-        };
-
-        await doc.save();
-      }
-    } catch (telegramError) {
-      console.error('problem discovery telegram publish failed:', telegramError);
-
-      if (doc.telegram !== undefined || doc.schema?.path?.('telegram')) {
-        doc.telegram = {
-          published: false,
-          channelId: process.env.TELEGRAM_CHANNEL_ID || '',
-          messageIds: [],
-          publishedAt: null,
-          reportHtml: '',
-          error: telegramError.message || 'Telegram publish failed',
-        };
-
-        await doc.save();
-      }
-    }
-
-    return res.status(201).json({
+    return res.status(202).json({
       ok: true,
-      message: 'Problem discovery run created successfully',
-      data: doc,
+      success: true,
+      message: 'Problem discovery started in background',
+      data: {
+        runId: run._id,
+        status: run.status,
+        crewName: run.crewName,
+        createdAt: run.createdAt,
+      },
     });
   } catch (error) {
     console.error(error);
@@ -187,6 +83,7 @@ export async function getProblemDiscoveryRuns(req, res, next) {
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'Problem discovery runs fetched successfully',
       data: {
         items,
@@ -211,12 +108,14 @@ export async function getProblemDiscoveryRunById(req, res, next) {
     if (!doc) {
       return res.status(404).json({
         ok: false,
+        success: false,
         message: 'Problem discovery run not found',
       });
     }
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'Problem discovery run fetched successfully',
       data: doc,
     });
@@ -233,12 +132,14 @@ export async function deleteProblemDiscoveryRun(req, res, next) {
     if (!doc) {
       return res.status(404).json({
         ok: false,
+        success: false,
         message: 'Problem discovery run not found',
       });
     }
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'Problem discovery run deleted successfully',
       data: doc,
     });

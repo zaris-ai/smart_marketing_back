@@ -3,6 +3,8 @@ import Joi from 'joi';
 
 import Store from '../../models/store.model.js';
 import StoreCrmActivity from '../../models/storeCrmActivity.model.js';
+import StoreCrmAnalysis from '../../models/storeCrmAnalysis.model.js';
+import { enqueueCrewRun } from '../../services/backgroundCrew.service.js';
 import {
   parsePagination,
   buildPaginationMeta,
@@ -27,6 +29,11 @@ function validate(schema, payload) {
 
 function isValidObjectId(id) {
   return mongoose.Types.ObjectId.isValid(id);
+}
+
+function normalizeString(value) {
+  if (typeof value !== 'string') return '';
+  return value.trim();
 }
 
 const activityTypes = [
@@ -202,6 +209,40 @@ async function buildCrmSummary(storeId) {
   };
 }
 
+function buildStoreAnalysisPayload({ store, activities, summary }) {
+  return {
+    store: {
+      id: String(store._id),
+      name: store.name || store.title || '',
+      domain: store.domain || store.website || store.url || '',
+      email: store.email || '',
+      phone: store.phone || '',
+      country: store.country || '',
+      city: store.city || '',
+      platform: store.platform || '',
+      category: store.category || '',
+      description: store.description || '',
+      raw: store,
+    },
+    crm_summary: summary,
+    recent_activities: activities.map((activity) => ({
+      id: String(activity._id),
+      type: activity.type || '',
+      title: activity.title || '',
+      body: activity.body || '',
+      emailSent: Boolean(activity.emailSent),
+      emailTo: activity.emailTo || '',
+      emailSubject: activity.emailSubject || '',
+      contactPerson: activity.contactPerson || '',
+      outcome: activity.outcome || 'none',
+      nextFollowUpAt: activity.nextFollowUpAt || null,
+      metadata: activity.metadata || {},
+      createdAt: activity.createdAt || null,
+      updatedAt: activity.updatedAt || null,
+    })),
+  };
+}
+
 export async function listStoreCrmActivities(req, res) {
   try {
     const { storeId } = req.params;
@@ -209,6 +250,7 @@ export async function listStoreCrmActivities(req, res) {
     if (!isValidObjectId(storeId)) {
       return res.status(400).json({
         ok: false,
+        success: false,
         error: 'Invalid store id',
       });
     }
@@ -218,6 +260,7 @@ export async function listStoreCrmActivities(req, res) {
     if (error) {
       return res.status(400).json({
         ok: false,
+        success: false,
         error,
       });
     }
@@ -227,6 +270,7 @@ export async function listStoreCrmActivities(req, res) {
     if (!store) {
       return res.status(404).json({
         ok: false,
+        success: false,
         error: 'Store not found',
       });
     }
@@ -263,7 +307,7 @@ export async function listStoreCrmActivities(req, res) {
       ];
     }
 
-    const [activities, total, summary] = await Promise.all([
+    const [activities, total, summary, latestAnalysis] = await Promise.all([
       StoreCrmActivity.find(filter)
         .sort({ createdAt: -1 })
         .skip(skip)
@@ -273,15 +317,22 @@ export async function listStoreCrmActivities(req, res) {
       StoreCrmActivity.countDocuments(filter),
 
       buildCrmSummary(storeId),
+
+      StoreCrmAnalysis.findOne({
+        store: storeId,
+      })
+        .sort({ createdAt: -1 })
+        .lean(),
     ]);
 
     return res.status(200).json({
       ok: true,
+      success: true,
       data: {
         store,
         activities,
         summary,
-        latestAnalysis: null,
+        latestAnalysis: latestAnalysis || null,
         pagination: buildPaginationMeta({
           page,
           limit,
@@ -294,7 +345,85 @@ export async function listStoreCrmActivities(req, res) {
 
     return res.status(500).json({
       ok: false,
+      success: false,
       error: error.message || 'Failed to load CRM activities',
+    });
+  }
+}
+
+export async function analyzeStoreCrmActivities(req, res) {
+  try {
+    const { storeId } = req.params;
+
+    if (!isValidObjectId(storeId)) {
+      return res.status(400).json({
+        ok: false,
+        success: false,
+        error: 'Invalid store id',
+      });
+    }
+
+    const store = await Store.findById(storeId).lean();
+
+    if (!store) {
+      return res.status(404).json({
+        ok: false,
+        success: false,
+        error: 'Store not found',
+      });
+    }
+
+    const [activities, summary] = await Promise.all([
+      StoreCrmActivity.find({
+        store: storeId,
+      })
+        .sort({ createdAt: -1 })
+        .limit(50)
+        .lean(),
+
+      buildCrmSummary(storeId),
+    ]);
+
+    const payload = buildStoreAnalysisPayload({
+      store,
+      activities,
+      summary,
+    });
+
+    const storeName = normalizeString(store.name || store.title);
+    const storeDomain = normalizeString(store.domain || store.website || store.url);
+
+    const run = await enqueueCrewRun({
+      crewName: 'store_crm_analysis',
+      title: `CRM analysis: ${storeName || storeDomain || storeId}`,
+      payload,
+      meta: {
+        storeId,
+        storeName,
+        storeDomain,
+        activitiesCount: activities.length,
+      },
+      userId: req.user?._id || null,
+    });
+
+    return res.status(202).json({
+      ok: true,
+      success: true,
+      message: 'Store CRM analysis started in background',
+      data: {
+        runId: run._id,
+        status: run.status,
+        crewName: run.crewName,
+        createdAt: run.createdAt,
+      },
+    });
+  } catch (error) {
+    console.error('analyzeStoreCrmActivities error:', error);
+
+    return res.status(500).json({
+      ok: false,
+      success: false,
+      error: error.message || 'Failed to start CRM analysis',
     });
   }
 }
@@ -306,6 +435,7 @@ export async function createStoreCrmActivity(req, res) {
     if (!isValidObjectId(storeId)) {
       return res.status(400).json({
         ok: false,
+        success: false,
         error: 'Invalid store id',
       });
     }
@@ -315,6 +445,7 @@ export async function createStoreCrmActivity(req, res) {
     if (!store) {
       return res.status(404).json({
         ok: false,
+        success: false,
         error: 'Store not found',
       });
     }
@@ -324,6 +455,7 @@ export async function createStoreCrmActivity(req, res) {
     if (error) {
       return res.status(400).json({
         ok: false,
+        success: false,
         error,
       });
     }
@@ -334,9 +466,10 @@ export async function createStoreCrmActivity(req, res) {
       ...payload,
       store: storeId,
     });
-
+    console.log(activity)
     return res.status(201).json({
       ok: true,
+      success: true,
       message: 'CRM activity added successfully',
       data: {
         activity,
@@ -347,6 +480,7 @@ export async function createStoreCrmActivity(req, res) {
 
     return res.status(500).json({
       ok: false,
+      success: false,
       error: error.message || 'Failed to create CRM activity',
     });
   }
@@ -359,6 +493,7 @@ export async function updateStoreCrmActivity(req, res) {
     if (!isValidObjectId(storeId) || !isValidObjectId(activityId)) {
       return res.status(400).json({
         ok: false,
+        success: false,
         error: 'Invalid store or activity id',
       });
     }
@@ -368,6 +503,7 @@ export async function updateStoreCrmActivity(req, res) {
     if (error) {
       return res.status(400).json({
         ok: false,
+        success: false,
         error,
       });
     }
@@ -380,6 +516,7 @@ export async function updateStoreCrmActivity(req, res) {
     if (!activity) {
       return res.status(404).json({
         ok: false,
+        success: false,
         error: 'CRM activity not found',
       });
     }
@@ -390,6 +527,7 @@ export async function updateStoreCrmActivity(req, res) {
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'CRM activity updated successfully',
       data: {
         activity,
@@ -400,6 +538,7 @@ export async function updateStoreCrmActivity(req, res) {
 
     return res.status(500).json({
       ok: false,
+      success: false,
       error: error.message || 'Failed to update CRM activity',
     });
   }
@@ -412,6 +551,7 @@ export async function deleteStoreCrmActivity(req, res) {
     if (!isValidObjectId(storeId) || !isValidObjectId(activityId)) {
       return res.status(400).json({
         ok: false,
+        success: false,
         error: 'Invalid store or activity id',
       });
     }
@@ -424,6 +564,7 @@ export async function deleteStoreCrmActivity(req, res) {
     if (!activity) {
       return res.status(404).json({
         ok: false,
+        success: false,
         error: 'CRM activity not found',
       });
     }
@@ -432,6 +573,7 @@ export async function deleteStoreCrmActivity(req, res) {
 
     return res.status(200).json({
       ok: true,
+      success: true,
       message: 'CRM activity deleted successfully',
     });
   } catch (error) {
@@ -439,6 +581,7 @@ export async function deleteStoreCrmActivity(req, res) {
 
     return res.status(500).json({
       ok: false,
+      success: false,
       error: error.message || 'Failed to delete CRM activity',
     });
   }

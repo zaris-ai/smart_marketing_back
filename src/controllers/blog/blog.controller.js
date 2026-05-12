@@ -1,30 +1,12 @@
 import mongoose from 'mongoose';
-import { marked } from 'marked';
 import sanitizeHtml from 'sanitize-html';
-import { randomUUID } from 'node:crypto';
 
 import AiBlog from '../../models/ai-blog.model.js';
-import { runPythonCrew } from '../../services/pythonRunner.service.js';
+import { enqueueCrewRun } from '../../services/backgroundCrew.service.js';
 import { requireFields } from './crew.validators.js';
-
-marked.setOptions({
-  gfm: true,
-  breaks: false,
-});
 
 function cleanString(value = '') {
   return String(value || '').trim();
-}
-
-function safeParseJson(value) {
-  if (!value) return null;
-  if (typeof value === 'object') return value;
-
-  try {
-    return JSON.parse(value);
-  } catch {
-    return null;
-  }
 }
 
 function normalizeStringArray(value) {
@@ -42,7 +24,8 @@ function normalizeStringArray(value) {
 function getRequiredModelSourceLinks() {
   return [
     process.env.BLOG_SOURCE_LINK_1 || 'https://web.arkaanalyzer.com/',
-    process.env.BLOG_SOURCE_LINK_2 || 'https://apps.shopify.com/arka-smart-analyzer',
+    process.env.BLOG_SOURCE_LINK_2 ||
+      'https://apps.shopify.com/arka-smart-analyzer',
   ];
 }
 
@@ -89,7 +72,7 @@ function sanitizeBlogHtml(html = '') {
         color: [
           /^#[0-9a-f]{3,8}$/i,
           /^rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)$/i,
-          /^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(0|1|0?\.\d+)\s*\)$/i,
+          /^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(0|1|0?\.\d+)\s*\)$/i,
         ],
       },
     },
@@ -100,94 +83,6 @@ function sanitizeBlogHtml(html = '') {
       }),
     },
   });
-}
-
-function slugify(value = '') {
-  const slug = String(value || '')
-    .toLowerCase()
-    .trim()
-    .replace(/[^\p{L}\p{N}]+/gu, '-')
-    .replace(/^-+|-+$/g, '');
-
-  return slug || `blog-${randomUUID().slice(0, 8)}`;
-}
-
-async function makeUniqueSlug(title) {
-  const baseSlug = slugify(title);
-  let slug = baseSlug;
-  let counter = 2;
-
-  while (await AiBlog.exists({ slug })) {
-    slug = `${baseSlug}-${counter}`;
-    counter += 1;
-  }
-
-  return slug;
-}
-
-function normalizeBlogResult(rawContent, payload) {
-  const parsed = safeParseJson(rawContent);
-
-  if (parsed && typeof parsed === 'object') {
-    const title = cleanString(
-      parsed.title || payload.title || payload.topic || 'Untitled blog'
-    );
-
-    const metaDescription = cleanString(
-      parsed.meta_description || parsed.metaDescription || ''
-    );
-
-    const excerpt = cleanString(parsed.excerpt || '');
-
-    const suggestedKeywords = normalizeStringArray(
-      parsed.suggested_keywords ||
-        parsed.suggestedKeywords ||
-        payload.keywords ||
-        []
-    );
-
-    const contentMarkdown = cleanString(
-      parsed.content_markdown ||
-        parsed.contentMarkdown ||
-        parsed.markdown ||
-        ''
-    );
-
-    const explicitHtml = cleanString(parsed.content_html || parsed.contentHtml || '');
-
-    const contentHtml = explicitHtml
-      ? sanitizeBlogHtml(explicitHtml)
-      : sanitizeBlogHtml(contentMarkdown ? marked.parse(contentMarkdown) : '');
-
-    const telegramReport = cleanString(
-      parsed.telegram_report || parsed.telegramReport || ''
-    );
-
-    return {
-      title,
-      metaDescription,
-      excerpt,
-      suggestedKeywords,
-      contentMarkdown,
-      contentHtml,
-      telegramReport,
-      raw: parsed,
-    };
-  }
-
-  const contentMarkdown = cleanString(rawContent);
-  const contentHtml = sanitizeBlogHtml(contentMarkdown ? marked.parse(contentMarkdown) : '');
-
-  return {
-    title: cleanString(payload.title || payload.topic || 'Untitled blog'),
-    metaDescription: '',
-    excerpt: '',
-    suggestedKeywords: normalizeStringArray(payload.keywords),
-    contentMarkdown,
-    contentHtml,
-    telegramReport: `Blog generated: ${payload.topic}`,
-    raw: rawContent,
-  };
 }
 
 function toBlogResponse(blog) {
@@ -251,6 +146,7 @@ export async function listBlogs(req, res, next) {
 
     return res.json({
       success: true,
+      ok: true,
       message: 'Blogs loaded successfully',
       data: {
         items,
@@ -274,6 +170,7 @@ export async function getBlogById(req, res, next) {
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
+        ok: false,
         message: 'Invalid blog id',
       });
     }
@@ -283,12 +180,14 @@ export async function getBlogById(req, res, next) {
     if (!blog) {
       return res.status(404).json({
         success: false,
+        ok: false,
         message: 'Blog not found',
       });
     }
 
     return res.json({
       success: true,
+      ok: true,
       message: 'Blog loaded successfully',
       data: {
         blog: toBlogResponse(blog),
@@ -313,79 +212,31 @@ export async function createBlog(req, res, next) {
       max_words: Number(req.body.max_words || 1200),
     };
 
-    const result = await runPythonCrew({
+    const run = await enqueueCrewRun({
       crewName: 'blog',
+      title: `Blog: ${payload.title || payload.topic}`,
       payload,
+      meta: {
+        appName: req.body.appName || 'Arka: Smart Analyzer',
+        sourceLinks: getRequiredModelSourceLinks(),
+        decisionSource: 'auto_from_links',
+      },
+      userId: req.user?._id || null,
     });
 
-    const rawContent = result?.result?.content || '';
-    const normalized = normalizeBlogResult(rawContent, payload);
-
-    if (!normalized.contentHtml) {
-      return res.status(500).json({
-        success: false,
-        message: 'Blog crew output was empty or invalid',
-      });
-    }
-
-    const runId = randomUUID();
-    const slug = await makeUniqueSlug(normalized.title);
-
-    const savedBlog = await AiBlog.create({
-      title: normalized.title,
-      slug,
-      topic: payload.topic,
-      audience: payload.audience,
-      appName: req.body.appName || 'Arka: Smart Analyzer',
-
-      // Required by your existing model.
-      // Hidden from frontend.
-      sourceLinks: getRequiredModelSourceLinks(),
-
-      suggestedKeywords: normalized.suggestedKeywords,
-      metaDescription: normalized.metaDescription,
-      excerpt: normalized.excerpt,
-      contentHtml: normalized.contentHtml,
-      contentMarkdown: normalized.contentMarkdown,
-
-      editorData: {
-        format: 'html',
-        source: 'crew_generated',
-        html: normalized.contentHtml,
-      },
-
-      // Your current model enum only allows this.
-      decisionSource: 'auto_from_links',
-
-      // Your current model allows this string even though default is blog_from_links.
-      crewName: 'blog',
-
-      rawResult: {
-        runId,
-        payload,
-        crewResult: result,
-        parsed: normalized.raw,
-      },
-
-      status: 'draft',
-    });
-
-    return res.status(201).json({
+    return res.status(202).json({
       success: true,
       ok: true,
-      message: 'Blog created and saved successfully',
+      message: 'Blog generation started in background',
       data: {
-        runId,
-        blog: toBlogResponse(savedBlog),
-        result: {
-          content: savedBlog.contentMarkdown,
-          html: savedBlog.contentHtml,
-          telegram_report: normalized.telegramReport,
-        },
+        runId: run._id,
+        status: run.status,
+        crewName: run.crewName,
+        createdAt: run.createdAt,
       },
     });
   } catch (error) {
-    console.log('createBlog error:', error);
+    console.log('createBlog enqueue error:', error);
     next(error);
   }
 }
@@ -397,6 +248,7 @@ export async function updateBlog(req, res, next) {
     if (!mongoose.isValidObjectId(id)) {
       return res.status(400).json({
         success: false,
+        ok: false,
         message: 'Invalid blog id',
       });
     }
@@ -406,6 +258,7 @@ export async function updateBlog(req, res, next) {
     if (!blog) {
       return res.status(404).json({
         success: false,
+        ok: false,
         message: 'Blog not found',
       });
     }
@@ -416,6 +269,7 @@ export async function updateBlog(req, res, next) {
       if (!title) {
         return res.status(400).json({
           success: false,
+          ok: false,
           message: 'Title cannot be empty',
         });
       }
@@ -429,6 +283,7 @@ export async function updateBlog(req, res, next) {
       if (!topic) {
         return res.status(400).json({
           success: false,
+          ok: false,
           message: 'Topic cannot be empty',
         });
       }
@@ -458,6 +313,7 @@ export async function updateBlog(req, res, next) {
       if (!contentHtml) {
         return res.status(400).json({
           success: false,
+          ok: false,
           message: 'Content HTML cannot be empty',
         });
       }
@@ -486,6 +342,7 @@ export async function updateBlog(req, res, next) {
       if (!['draft', 'published'].includes(status)) {
         return res.status(400).json({
           success: false,
+          ok: false,
           message: 'Invalid blog status',
         });
       }
