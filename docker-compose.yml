@@ -137,7 +137,7 @@ services:
     container_name: node_crewai_redis
     restart: unless-stopped
     ports:
-      - "6379:6379"
+      - "6380:6380"
     networks:
       - crew-network
 
