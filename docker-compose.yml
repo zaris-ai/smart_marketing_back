@@ -46,7 +46,7 @@ services:
       # Google OAuth
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
-      GOOGLE_REDIRECT_URI: http://localhost:10085/api/gmail/oauth2/callback
+      GOOGLE_REDIRECT_URI: ${GOOGLE_REDIRECT_URI}
       GOOGLE_REFRESH_TOKEN: ${GOOGLE_REFRESH_TOKEN}
 
       # Crawler

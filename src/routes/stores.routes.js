@@ -22,6 +22,12 @@ import {
   analyzeStoreCrmActivities,
 } from '../controllers/stores/storeCrm.controller.js';
 
+import {
+  bulkDiscoverStoreContacts,
+  discoverContactsByUrl,
+  discoverStoreContacts,
+} from '../controllers/stores/storeContactDiscovery.controller.js';
+
 const router = express.Router();
 
 const importUploadDir = path.join(process.cwd(), 'uploads', 'imports');
@@ -111,5 +117,10 @@ router.delete(
 router.get('/:id', auth, getStoreById);
 router.patch('/:id', auth, updateStore);
 router.delete('/:id', auth, deleteStore);
+
+
+router.post('/discover-contacts', discoverContactsByUrl);
+router.post('/discover-contacts/bulk', bulkDiscoverStoreContacts);
+router.post('/:id/discover-contacts', discoverStoreContacts);
 
 export default router;

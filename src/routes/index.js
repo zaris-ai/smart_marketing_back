@@ -19,6 +19,8 @@ import instagramAgentRoutes from './instagram-agent.routes.js';
 import instagramPostAgentRoutes from './instagram-post-agent.routes.js';
 import uploadRoutes from './upload.routes.js';
 import backgroundRunsRoutes from './background-runs.routes.js';
+import manualBlogRoutes from './manual-blog.routes.js';
+
 
 const router = Router();
 
@@ -42,5 +44,6 @@ router.use('/instagram-agent', instagramAgentRoutes);
 router.use('/instagram-post-agent', instagramPostAgentRoutes);
 router.use('/upload', uploadRoutes);
 router.use('/background-runs', backgroundRunsRoutes);
+router.use('/manual-blogs', manualBlogRoutes);
 
 export default router;
